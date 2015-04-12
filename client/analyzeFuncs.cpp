@@ -1138,6 +1138,17 @@ int seti_analyze (ANALYSIS_STATE& state)
 #ifdef USE_CUDA
       if(gSetiUseCudaDevice)
 	{
+	  bool noscore = false;
+	  int PulsePoTLen = 0, Overlap = 0, PoTLen;
+	  PoTLen = NumDataPoints / fftlen;
+	  GetPulsePoTLen(PoTLen, &PulsePoTLen, &Overlap);  
+
+	  bool SkipTriplet = false, SkipPulse = false;
+	  bool SkipGauss = !(ChirpFftPairs[icfft].GaussFit);
+	  if(PulsePoTLen > PoTInfo.TripletMax || PulsePoTLen < PoTInfo.TripletMin)
+	    SkipTriplet = true;
+	  SkipPulse = !(ChirpFftPairs[icfft].PulseFind);
+
 	  //printf("Calling dfts\r\n");
 	  cudaAcc_execute_dfts(FftNum, chirpoffset);
 	  state.FLOP_counter+=5*(double)fftlen*log((double)fftlen)/log(2.0) * NumFfts;           
@@ -1150,7 +1161,7 @@ int seti_analyze (ANALYSIS_STATE& state)
 	  if(state.PoT_freq_bin == -1) 
 	    {
 	      //printf("Calling summax\r\n");
- 	      cudaAcc_summax(fftlen);
+	      cudaAcc_summax(fftlen);
 	      cudaEventRecord(summaxDoneEvent, fftstream1);
 	      state.FLOP_counter+=NumDataPoints;
 	      if(swi.analysis_cfg.spikes_per_spectrum > 1) 
@@ -1160,15 +1171,7 @@ int seti_analyze (ANALYSIS_STATE& state)
 	    }
 
 	  // XXXXXXXXXXXXX
-	  bool SkipTriplet = false, SkipPulse = false;
-	  int PulsePoTLen = 0, Overlap = 0, PoTLen;
-	  PoTLen = NumDataPoints / fftlen;
-	  GetPulsePoTLen(PoTLen, &PulsePoTLen, &Overlap);  
 	  int AdvanceBy  = PulsePoTLen - Overlap;     // in bins		   
-
-	  if(PulsePoTLen > PoTInfo.TripletMax || PulsePoTLen < PoTInfo.TripletMin)
-	    SkipTriplet = true;
-	  SkipPulse = !(ChirpFftPairs[icfft].PulseFind);
 
 	  if(!SkipTriplet || !SkipPulse) // do beforehand on fftstreamX
 	    {
@@ -1182,15 +1185,13 @@ int seti_analyze (ANALYSIS_STATE& state)
 	      //printf("FindPulses\r\n");
 	      cudaAcc_find_pulses((float) best_pulse->score, PulsePoTLen, AdvanceBy, fftlen);
 	    }
-	  
+
 	  if(!SkipTriplet) 
 	    {
 	      //printf("FindTriplets\r\n");
 	      cudaAcc_find_triplets(PulsePoTLen, (float)PoTInfo.TripletThresh, AdvanceBy, fftlen);
 	    }
-	  
-	  // XXXXXXXXXXXXX
-	  
+
 	  if(state.PoT_freq_bin == -1) 
 	    {
 	      if(gCudaAutocorrelation && (fftlen == ac_fft_len))
@@ -1199,7 +1200,16 @@ int seti_analyze (ANALYSIS_STATE& state)
 
 		  cudaAcc_FindAutoCorrelations(ac_fft_len);
 		}
+	    }
+	  
+  	  if(!SkipGauss) 
+	    {
+	      //printf("FindGauss\r\n");
+	      cudaAcc_GaussfitStart(fftlen, best_gauss->score, noscore);
+	    } 
 
+	  if(state.PoT_freq_bin == -1) 
+	    {
 	      cudaEventSynchronize(summaxDoneEvent);
 	      //	  if(cudaStreamQuery(fftstream1) != cudaSuccess)
 	      //	    cudaStreamSynchronize(fftstream1); // wait for summax on stream1     
@@ -1229,7 +1239,7 @@ int seti_analyze (ANALYSIS_STATE& state)
 		  //Just enough info for updating best & reporting signals.
 		  for(ifft = 0; ifft < NumFfts; ifft++)
 		    cudaAcc_GetAutoCorrelation(autoCorrelation[ifft], ac_fft_len, ifft); 
-		  
+
 		  for(ifft = 0; ifft < NumFfts; ifft++)
 		    {
 		      retval = FindAutoCorrelation_c(autoCorrelation[ifft], fftlen, ifft, swi);

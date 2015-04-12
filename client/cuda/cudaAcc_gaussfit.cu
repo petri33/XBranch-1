@@ -47,6 +47,10 @@ extern volatile bool worker_thread_exit_ack;
 #include "cudaAcc_utilities.h"
 #include "lcgamm.h"
 
+
+cudaStream_t GaussFitStream; 
+
+
 __constant__ cudaAcc_GaussFit_t cudaAcc_GaussFit_settings;
 cudaAcc_GaussFit_t settings;
 
@@ -257,7 +261,7 @@ float cudaAcc_GetPeakScaleFactor(float f_sigma)
 
 // only if (ul_NumSpectra > ul_PoTLen)
 template <int ul_FftLength>
-__launch_bounds__(GFP_BLOCK, 8)
+__launch_bounds__(GFP_BLOCK)
 __global__ void GetFixedPoT_kernel(void) 
 {
   int ul_PoT = (blockIdx.x * GFP_BLOCK + threadIdx.x);
@@ -422,7 +426,6 @@ __global__ void NormalizePoT_kernel(void)
 
 template <int ul_FftLength>
 __launch_bounds__(NPK_BLOCK, 4)
-
 __global__ void NormalizePoT_kernel(void) 
 {
   int ul_PoT = blockIdx.x * NPK_BLOCK + threadIdx.x;
@@ -557,8 +560,15 @@ __device__ float cudaAcc_calc_GaussFit_score_cached(float chisqr, float null_chi
 }
 
 template <int ul_FftLength>
+__launch_bounds__(512,4)
 __global__ void GaussFit_kernel(float best_gauss_score, result_flag* flags, bool noscore) 
 {
+  if(blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.y == 0 && threadIdx.x == 0) // reset flags
+    {
+      flags->has_results = 0;
+    }
+
+
   int ul_PoT = blockIdx.x * blockDim.x + threadIdx.x;    
   int ul_TOffset = blockIdx.y * blockDim.y + threadIdx.y + cudaAcc_GaussFit_settings.GaussTOffsetStart;
   if (ul_PoT >= ul_FftLength) return;
@@ -737,6 +747,8 @@ int cudaAcc_GaussfitStart(int ul_FftLength, double best_gauss_score, bool noscor
 {
   if(!cudaAcc_initialized()) return -1;
 
+  GaussFitStream = fftstream1;
+
   if(Gflags == NULL)
     cudaMallocHost(&Gflags, sizeof(*Gflags));
 
@@ -748,10 +760,12 @@ int cudaAcc_GaussfitStart(int ul_FftLength, double best_gauss_score, bool noscor
 #endif
 
   int ul_NumSpectra    = 1024*1024 / ul_FftLength; //cudaAcc_NumDataPoints
+
+  int err = cudaStreamWaitEvent(GaussFitStream, powerspectrumDoneEvent, 0);	
   
   if(ul_NumSpectra == settings.gauss_pot_length) 
     {
-      CUDA_ACC_SAFE_LAUNCH( (cudaMemcpyAsync(dev_PoTG, dev_PowerSpectrum, cudaAcc_NumDataPoints * sizeof(*dev_PowerSpectrum), cudaMemcpyDeviceToDevice, fftstream2)),true);        
+      CUDA_ACC_SAFE_LAUNCH( (cudaMemcpyAsync(dev_PoTG, dev_PowerSpectrum, cudaAcc_NumDataPoints * sizeof(*dev_PowerSpectrum), cudaMemcpyDeviceToDevice, GaussFitStream)),true);        
     } 
   else if (ul_NumSpectra > settings.gauss_pot_length) 
     {
@@ -760,52 +774,52 @@ int cudaAcc_GaussfitStart(int ul_FftLength, double best_gauss_score, bool noscor
       switch(ul_FftLength)
 	{
 	case 8:
-	  GetFixedPoT_kernel<8><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<8><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 16:
-	  GetFixedPoT_kernel<16><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<16><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 32:
-	  GetFixedPoT_kernel<32><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<32><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 64:
-	  GetFixedPoT_kernel<64><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<64><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 128:
-	  GetFixedPoT_kernel<128><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<128><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 256:
-	  GetFixedPoT_kernel<256><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<256><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 512:
-	  GetFixedPoT_kernel<512><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<512><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 1024:
-	  GetFixedPoT_kernel<1024><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<1024><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 2048:
-	  GetFixedPoT_kernel<2048><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<2048><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 4096:
-	  GetFixedPoT_kernel<4096><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<4096><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 8192:
-	  GetFixedPoT_kernel<8192><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<8192><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 16384:
-	  GetFixedPoT_kernel<16384><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<16384><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 32768:
-	  GetFixedPoT_kernel<32768><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<32768><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 65536:
-	  GetFixedPoT_kernel<65536><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<65536><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 131072:
-	  GetFixedPoT_kernel<131072><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<131072><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	case 262144:
-	  GetFixedPoT_kernel<262144><<<gridPOT, blockPOT, 0, fftstream2>>>();
+	  GetFixedPoT_kernel<262144><<<gridPOT, blockPOT, 0, GaussFitStream>>>();
 	  break;
 	}
     } 
@@ -817,113 +831,117 @@ int cudaAcc_GaussfitStart(int ul_FftLength, double best_gauss_score, bool noscor
   switch(ul_FftLength)
     {
     case 8:
-      NormalizePoT_kernel<8><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<8><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 16:
-      NormalizePoT_kernel<16><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<16><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 32:
-      NormalizePoT_kernel<32><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<32><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 64:
-      NormalizePoT_kernel<64><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<64><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 128:
-      NormalizePoT_kernel<128><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<128><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 256:
-      NormalizePoT_kernel<256><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<256><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 512:
-      NormalizePoT_kernel<512><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<512><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 1024:
-      NormalizePoT_kernel<1024><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<1024><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 2048:
-      NormalizePoT_kernel<2048><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<2048><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 4096:
-      NormalizePoT_kernel<4096><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<4096><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 8192:
-      NormalizePoT_kernel<8192><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<8192><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 16384:
-      NormalizePoT_kernel<16384><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<16384><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 32768:
-      NormalizePoT_kernel<32768><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<32768><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 65536:
-      NormalizePoT_kernel<65536><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<65536><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 131072:
-      NormalizePoT_kernel<131072><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<131072><<<grid, block, 0, GaussFitStream>>>();
       break;
     case 262144:
-      NormalizePoT_kernel<262144><<<grid, block, 0, fftstream2>>>();
+      NormalizePoT_kernel<262144><<<grid, block, 0, GaussFitStream>>>();
       break;
     }
 
-  CUDA_ACC_SAFE_LAUNCH((cudaMemsetAsync(dev_flagG, 0, sizeof(*dev_flagG), fftstream2)),true);		
+  // kernel resets flags in thread0, block0
+  //CUDA_ACC_SAFE_LAUNCH((cudaMemsetAsync(dev_flagG, 0, sizeof(*dev_flagG), GaussFitStream)),true);	 
+	
 
-  dim3 block2(GFK_BLOCK, 4, 1);
+  dim3 block2(GFK_BLOCK, 4, 1); 
   dim3 grid2((ul_FftLength + block2.x - 1) / block2.x, (settings.GaussTOffsetStop - settings.GaussTOffsetStart + block2.y) / block2.y, 1);
   switch(ul_FftLength)
   {
   case 8:
-    GaussFit_kernel<8><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<8><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 16:
-    GaussFit_kernel<16><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<16><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 32:
-    GaussFit_kernel<32><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<32><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 64:
-    GaussFit_kernel<64><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<64><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 128:
-    GaussFit_kernel<128><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<128><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 256:
-    GaussFit_kernel<256><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<256><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 512:
-    GaussFit_kernel<512><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<512><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 1024:
-    GaussFit_kernel<1024><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<1024><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 2048:
-    GaussFit_kernel<2048><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<2048><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 4096:
-    GaussFit_kernel<4096><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<4096><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 8192:
-    GaussFit_kernel<8192><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<8192><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 16384:
-    GaussFit_kernel<16384><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<16384><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 32768:
-    GaussFit_kernel<32768><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<32768><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 65536:
-    GaussFit_kernel<65536><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<65536><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 131072:
-    GaussFit_kernel<131072><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<131072><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   case 262144:
-    GaussFit_kernel<262144><<<grid2, block2, 0, fftstream2>>>((float) best_gauss_score, dev_flagG, noscore);
+    GaussFit_kernel<262144><<<grid2, block2, 0, GaussFitStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
   }
   
   Gflags->has_results = -1;
-  CUDA_ACC_SAFE_LAUNCH( (cudaMemcpyAsync(Gflags, dev_flagG, sizeof(*dev_flagG), cudaMemcpyDeviceToHost, fftstream2)),true);
+  CUDA_ACC_SAFE_LAUNCH( (cudaMemcpyAsync(Gflags, dev_flagG, sizeof(*dev_flagG), cudaMemcpyDeviceToHost, GaussFitStream)),true);
+
+  //cudaEventRecord(gaussDoneEvent, GaussFitStream);
 
   return 0;
 }
@@ -931,11 +949,9 @@ int cudaAcc_GaussfitStart(int ul_FftLength, double best_gauss_score, bool noscor
 
 int cudaAcc_fetchGaussfitFlags(int ul_FftLength, double best_gauss_score) 
 {
-  if(Gflags->has_results == -1) // no reults (or not yet ready)
-    {
-      // CUDA_ACC_SAFE_CALL((CUDASYNC), true); // sync wait for results just in case.
-      cudaStreamSynchronize(fftstream2);
-    }
+  //if(Gflags->has_results == -1)
+    cudaStreamSynchronize(GaussFitStream);
+  //cudaStreamWaitEvent(GaussFitStream, gaussDoneEvent, 0); // fetch and wait
   
   if(Gflags->has_results > 0) 
     {
@@ -944,17 +960,18 @@ int cudaAcc_fetchGaussfitFlags(int ul_FftLength, double best_gauss_score)
       CUDA_ACC_SAFE_LAUNCH( (cudaMemcpyAsync(GaussFitResults,
 				      dev_GaussFitResults, 
 				      cudaAcc_NumDataPoints * sizeof(*dev_GaussFitResults),
-					     cudaMemcpyDeviceToHost, fftstream2)),true);  // TODO: Download a little bit less data
+					     cudaMemcpyDeviceToHost, GaussFitStream)),true);  // TODO: Download a little bit less data
 
-      CUDA_ACC_SAFE_LAUNCH((cudaMemcpyAsync(tmp_PoTG, dev_NormMaxPower, ul_FftLength * sizeof(*dev_NormMaxPower), cudaMemcpyDeviceToHost, fftstream2)),true);
+      CUDA_ACC_SAFE_LAUNCH((cudaMemcpyAsync(tmp_PoTG, dev_NormMaxPower, ul_FftLength * sizeof(*dev_NormMaxPower), cudaMemcpyDeviceToHost, GaussFitStream)),true);
 
       
       // Preparing data for cudaAcc_getPoT
-      cudaAcc_transposeGPU(dev_t_PowerSpectrumG, dev_PoTG, ul_FftLength, settings.gauss_pot_length, fftstream2);
+      cudaAcc_transposeGPU(dev_t_PowerSpectrumG, dev_PoTG, ul_FftLength, settings.gauss_pot_length, GaussFitStream);
 
-      CUDA_ACC_SAFE_LAUNCH((cudaMemcpyAsync(best_PoTG, dev_t_PowerSpectrumG, cudaAcc_NumDataPoints * sizeof(*dev_t_PowerSpectrumG), cudaMemcpyDeviceToHost, fftstream2)),true); 
+      CUDA_ACC_SAFE_LAUNCH((cudaMemcpyAsync(best_PoTG, dev_t_PowerSpectrumG, cudaAcc_NumDataPoints * sizeof(*dev_t_PowerSpectrumG), cudaMemcpyDeviceToHost, GaussFitStream)),true); 
     }
-
+  
+  cudaEventRecord(gaussDoneEvent, GaussFitStream);
   // TODO: Download a little bit less data
   return Gflags->has_results;
 }
@@ -963,7 +980,8 @@ int cudaAcc_fetchGaussfitFlags(int ul_FftLength, double best_gauss_score)
 int cudaAcc_processGaussFit(int ul_FftLength, double best_gauss_score)
 {
   //CUDA_ACC_SAFE_CALL((CUDASYNC), true); // fetch and wait.
-  cudaStreamSynchronize(fftstream2); // fetch and wait
+
+  cudaEventSynchronize(gaussDoneEvent);
   
   int result_count = 0;
   for(int TOffset = settings.GaussTOffsetStart; TOffset < settings.GaussTOffsetStop; TOffset++) 

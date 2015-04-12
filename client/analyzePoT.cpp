@@ -237,8 +237,8 @@ int analyze_pot(float *PowerSpectrum, int NumDataPoints, ChirpFftPair_t &cfft)
 
 	  //cudaAcc_Gaussfit(FftLength, best_gauss->score, noscore);
 	  //printf("GaussFitStart\r\n");
-	  b_gaussStarted = true;
-	  cudaAcc_GaussfitStart(FftLength, best_gauss->score, noscore);
+	  b_gaussStarted = true; // started earlier
+	  //cudaAcc_GaussfitStart(FftLength, best_gauss->score, noscore);
 
 	  if(PoTLen > swi.analysis_cfg.gauss_pot_length)
 	    analysis_state.FLOP_counter+=((double)NumDataPoints+swi.analysis_cfg.gauss_pot_length * (FftLength-1)); // GetFixedPoT

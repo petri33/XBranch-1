@@ -72,10 +72,10 @@ cudaEvent_t ac_reduce_partialEvent[8];
 cudaEvent_t meanDoneEvent;
 cudaEvent_t tripletsDoneEvent;
 cudaEvent_t pulseDoneEvent;
+cudaEvent_t gaussDoneEvent;
 
-cudaStream_t fftstream0 = NULL;
-cudaStream_t fftstream1 = NULL;
-cudaStream_t fftstream2 = NULL;
+cudaStream_t fftstream0 = 0;
+cudaStream_t fftstream1 = 0;
 
 #define CUDA_MAXNUMSTREAMS 2
 int cudaAcc_NumDataPoints;
@@ -84,7 +84,7 @@ int cudaAcc_NumDataPoints;
 bool cuda_pinned = false;
 cudaStream_t cudapsStream[CUDA_MAXNUMSTREAMS];
 cudaStream_t cudaAutocorrStream[8];
-//cudaStream_t cudaAutocorrStream;
+
 
 extern __global__ void cudaAcc_summax32_kernel(float *input, float3* output, int iterations);
 template <int blockx> __global__ void find_triplets_kernel(int ul_FftLength, int len_power, volatile float triplet_thresh, int AdvanceBy);
@@ -365,6 +365,7 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
   cudaEventCreateWithFlags(&meanDoneEvent, cudaEventDisableTiming);
   cudaEventCreateWithFlags(&tripletsDoneEvent, cudaEventDisableTiming);
   cudaEventCreateWithFlags(&pulseDoneEvent, cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&gaussDoneEvent, cudaEventDisableTiming);
 
   // events created
 
@@ -635,7 +636,6 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
   
   cudaStreamCreate(&fftstream0);
   cudaStreamCreate(&fftstream1);
-  cudaStreamCreate(&fftstream2);
 
   if(cudaAcc_initializeGaussfit(PoTInfo, gauss_pot_length, nsamples, gauss_null_chi_sq_thresh, gauss_chi_sq_thresh))
     {
@@ -734,7 +734,7 @@ int cudaAcc_InitializeAutocorrelation(int ac_fftlen)
 	      fprintf(stderr, "cudaMalloc error %d", i);
 	      return 1;
 	    }
-	  err = cudaMallocHost((void **)&blockSums[i], 131072*sizeof(float3));
+	  err = cudaMallocHost((void **)&blockSums[i], 131072/256*sizeof(float3));
 	  if(cudaSuccess != err) 
 	    {
 	      fprintf(stderr, "cudaMallocHost blockSums %d failed", i);

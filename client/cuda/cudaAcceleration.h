@@ -53,10 +53,10 @@ extern cudaEvent_t ac_reduce_partialEvent[8];
 extern cudaEvent_t meanDoneEvent;
 extern cudaEvent_t tripletsDoneEvent;
 extern cudaEvent_t pulseDoneEvent;
+extern cudaEvent_t gaussDoneEvent;
 
 extern cudaStream_t fftstream0; // fft, triplet
 extern cudaStream_t fftstream1; // pulse
-extern cudaStream_t fftstream2; // gauss
 extern cudaStream_t cudaAutocorrStream[8]; // autocorr
 
 //Public function prototypes
