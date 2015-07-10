@@ -23,7 +23,7 @@ int cudaAcc_fftwf_plan_dft_1d(int FftNum, int FftLen, int NumDataPoints)
     }
 #if CUDART_VERSION >= 3000
   cufftSetStream(fft_analysis_plans[FftNum][0], fftstream0);
-  cufftSetCompatibilityMode(fft_analysis_plans[FftNum][0],CUFFT_COMPATIBILITY_NATIVE);
+  cufftSetCompatibilityMode(fft_analysis_plans[FftNum][0], CUFFT_COMPATIBILITY_NATIVE);
 #endif
   
   cufft_init[FftNum] = 1; 
@@ -37,7 +37,7 @@ int cudaAcc_fftwf_plan_dft_1d(int FftNum, int FftLen, int NumDataPoints)
 
 void cudaAcc_execute_dfts(int FftNum, int offset) 
 {
-  CUFFT_SAFE_CALL((cufftExecC2C(fft_analysis_plans[FftNum][0], dev_cx_ChirpDataArray + offset, dev_WorkData, CUFFT_INVERSE)));
+  CUFFT_SAFE_CALL((cufftExecC2C(fft_analysis_plans[FftNum][0], dev_cx_ChirpDataArray + offset, dev_WorkData + FftNum * 2 * 1179648 + offset, CUFFT_INVERSE)));
   cudaEventRecord(fftDoneEvent, fftstream0);
 }
 

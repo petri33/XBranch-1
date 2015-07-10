@@ -76,7 +76,8 @@ extern PoTInfo_t PoTInfo;
 int analyze_pot(
   float * fp_PowerSpectrum,
   int ul_NumDataPoints,
-  ChirpFftPair_t &cfft 
+  ChirpFftPair_t &cfft,
+  int offset
 );
 
 int GetFixedPoT(

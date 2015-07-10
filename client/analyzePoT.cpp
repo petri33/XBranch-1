@@ -72,7 +72,7 @@
 // change a number of these.
 PoTInfo_t PoTInfo =  {0};
 
-int analyze_pot(float *PowerSpectrum, int NumDataPoints, ChirpFftPair_t &cfft)
+int analyze_pot(float *PowerSpectrum, int NumDataPoints, ChirpFftPair_t &cfft, int offset)
 {
   // This function analyses Power over Time for the current data block.
   // The PoT array  is created by taking an array of power spectra (a
@@ -234,12 +234,12 @@ int analyze_pot(float *PowerSpectrum, int NumDataPoints, ChirpFftPair_t &cfft)
 	{
 	  //TODO: remove the autocorr_fftlen test when v6 fully deprecated.
 	  bool noscore = false; //swi.analysis_cfg.autocorr_fftlen!=0 && gaussian_count!=0;
-
+	  
 	  //cudaAcc_Gaussfit(FftLength, best_gauss->score, noscore);
 	  //printf("GaussFitStart\r\n");
 	  b_gaussStarted = true; // started earlier
 	  //cudaAcc_GaussfitStart(FftLength, best_gauss->score, noscore);
-
+	  
 	  if(PoTLen > swi.analysis_cfg.gauss_pot_length)
 	    analysis_state.FLOP_counter+=((double)NumDataPoints+swi.analysis_cfg.gauss_pot_length * (FftLength-1)); // GetFixedPoT
 	  // There are FftLength - 1 fixed PoTs for a chirp/fft pair, and for each fixed PoT full analysis would do
@@ -339,201 +339,201 @@ int analyze_pot(float *PowerSpectrum, int NumDataPoints, ChirpFftPair_t &cfft)
       PulsePoTNum = 0;
       
 #ifdef BOINC_APP_GRAPHICS
-    // Inital display of Local Progress
-    if(!nographics()) 
-      {
-	sah_graphics->local_progress = (((ThisPoT-1) * NumPulsePoTs) +
-					PulsePoTNum)                   *
-	  ProgressPerPulsePoT;
-      }
+      // Inital display of Local Progress
+      if(!nographics()) 
+	{
+	  sah_graphics->local_progress = (((ThisPoT-1) * NumPulsePoTs) +
+					  PulsePoTNum)                   *
+	    ProgressPerPulsePoT;
+	}
 #endif
-    
+      
 #ifdef USE_CUDA
-    if(gSetiUseCudaDevice)
-      {	
-	/*
-	if(!SkipTriplet || !SkipPulse) // do beforehand on fftstreamX
-	  {
+      if(gSetiUseCudaDevice)
+	{	
+	  /*
+	    if(!SkipTriplet || !SkipPulse) // do beforehand on fftstreamX
+	    {
 	    //	    CUDASYNC;
 	    //printf("CalculateMean\r\n");
 	    cudaAcc_calculate_mean(PulsePoTLen, 0, AdvanceBy, FftLength);
-	  }
-
-	if(!SkipPulse) 
-	  {
+	    }
+	    
+	    if(!SkipPulse) 
+	    {
 	    //printf("FindPulses\r\n");
 	    cudaAcc_find_pulses((float) best_pulse->score, PulsePoTLen, AdvanceBy, FftLength);
-	  }
-
-	if(!SkipTriplet) 
-	  {
+	    }
+	    
+	    if(!SkipTriplet) 
+	    {
 	    //printf("FindTriplets\r\n");
 	    cudaAcc_find_triplets(PulsePoTLen, (float)PoTInfo.TripletThresh, AdvanceBy, FftLength);
-	  }
-*/
-
-	//printf("fetchTripletAndPulseFlags\r\n");
-	int has_data = 0;
-	if(!SkipTriplet || !SkipPulse)
-          has_data = cudaAcc_fetchTripletAndPulseFlags(SkipTriplet, SkipPulse, PulsePoTLen, AdvanceBy, FftLength);
-
-        int gflags = 0;
-	if(b_gaussStarted)
-	  {
-	    //printf("fetchGaussFitFlags\r\n");
-	    b_gaussStarted = false;
-	    gflags = cudaAcc_fetchGaussfitFlags(FftLength, best_gauss->score);
-	  }
-
-	if(!SkipTriplet)
-	  {
-	    if((has_data & 1) && !(has_data & 4)) // has triplet data and no error in triplet
-	      {
-		//printf("processTripletResults\r\n");
-		cudaAcc_processTripletResults(PulsePoTLen, AdvanceBy, FftLength);
-	      }
-
-	    analysis_state.FLOP_counter+=(10.0 + PulsePoTLen) * NumPulsePoTs * (FftLength - 1);
-	    //  ! hard to estimate, so be generous and use 9
-	    analysis_state.FLOP_counter+=810.0; // (10.0*numBinsAboveThreshold*numBinsAboveThreshold);
-	    progress += ProgressUnitSize * TripletProgressUnits();
-	  }		
-
-	if(!SkipPulse) 
-	  {
-	    if((has_data & 2) && !(has_data & 8)) // has pulse data and no error in pulse
-	      {
-		//printf("processPulseResults\r\n");
-		cudaAcc_processPulseResults(PulsePoTLen, AdvanceBy, FftLength);
-	      }
-	    analysis_state.FLOP_counter+=(PulsePoTLen*0.1818181818182+400.0)*PulsePoTLen * NumPulsePoTs * (FftLength - 1);
-	    progress += ProgressUnitSize * PulseProgressUnits(PulsePoTLen, FftLength - 1);
-	  }
-
-	if(gflags > 0)
-	  {
-	    //printf("ProcessGaussFit\r\n");
-	    cudaAcc_processGaussFit(FftLength, best_gauss->score);
-	  }
-
-	//#ifndef CUDAACC_EMULATION
-	//if(!SkipTriplet)
+	    }
+	  */
+	  
+	  //printf("fetchTripletAndPulseFlags\r\n");
+	  int has_data = 0;
+	  if(!SkipTriplet || !SkipPulse)
+	    has_data = cudaAcc_fetchTripletAndPulseFlags(SkipTriplet, SkipPulse, PulsePoTLen, AdvanceBy, FftLength, offset);
+	  
+	  int gflags = 0;
+	  if(b_gaussStarted)
+	    {
+	      //printf("fetchGaussFitFlags\r\n");
+	      b_gaussStarted = false;
+	      gflags = cudaAcc_fetchGaussfitFlags(FftLength, best_gauss->score);
+	    }
+	  
+	  if(!SkipTriplet)
+	    {
+	      if((has_data & 1) && !(has_data & 4)) // has triplet data and no error in triplet
+		{
+		  //printf("processTripletResults\r\n");
+		  cudaAcc_processTripletResults(PulsePoTLen, AdvanceBy, FftLength);
+		}
+	      
+	      analysis_state.FLOP_counter+=(10.0 + PulsePoTLen) * NumPulsePoTs * (FftLength - 1);
+	      //  ! hard to estimate, so be generous and use 9
+	      analysis_state.FLOP_counter+=810.0; // (10.0*numBinsAboveThreshold*numBinsAboveThreshold);
+	      progress += ProgressUnitSize * TripletProgressUnits();
+	    }		
+	  
+	  if(!SkipPulse) 
+	    {
+	      if((has_data & 2) && !(has_data & 8)) // has pulse data and no error in pulse
+		{
+		  //printf("processPulseResults\r\n");
+		  cudaAcc_processPulseResults(PulsePoTLen, AdvanceBy, FftLength);
+		}
+	      analysis_state.FLOP_counter+=(PulsePoTLen*0.1818181818182+400.0)*PulsePoTLen * NumPulsePoTs * (FftLength - 1);
+	      progress += ProgressUnitSize * PulseProgressUnits(PulsePoTLen, FftLength - 1);
+	    }
+	  
+	  if(gflags > 0)
+	    {
+	      //printf("ProcessGaussFit\r\n");
+	      cudaAcc_processGaussFit(FftLength, best_gauss->score);
+	    }
+	  
+	  //#ifndef CUDAACC_EMULATION
+	  //if(!SkipTriplet)
 	  //	  cudaAcc_fetchTripletAndPulseFlags(SkipTriplet, SkipPulse, PulsePoTLen, AdvanceBy, FftLength);
-	progress=std::min(progress,1.0); // prevent display of > 100%
-	fraction_done(progress,remaining);
-	//if(!SkipTriplet)
-	//  cudaAcc_processTripletResults(PulsePoTLen, AdvanceBy, FftLength);
-	//#endif //CUDAACC_EMULATION
-      }
-    else
-      {
+	  progress=std::min(progress,1.0); // prevent display of > 100%
+	  fraction_done(progress,remaining);
+	  //if(!SkipTriplet)
+	  //  cudaAcc_processTripletResults(PulsePoTLen, AdvanceBy, FftLength);
+	  //#endif //CUDAACC_EMULATION
+	}
+      else
+	{
 #endif //USE_CUDA
-	
-	// loop through frequencies
-	for(; ThisPoT < FftLength; ThisPoT++) 
-	  {
-	    // loop through time for each frequency.  PulsePoTNum is
-	    // used only for progress calculation.
-	    for(TOffset = 0, PulsePoTNum = 1, TOffsetOK = true;
-		TOffsetOK;
-		PulsePoTNum++, TOffset += AdvanceBy) 
-	      {
-		
-		// Create PowerOfTime array for pulse detection.  If there
-		// are not enough points left in this PoT, adjust TOffset
-		// to get the latest possible pulse PoT.
-		if(TOffset + PulsePoTLen >= PoTLen) 
-		  {
-		    TOffsetOK = false;
-		    TOffset = PoTLen - PulsePoTLen;
-		  }
-		if (use_transposed_pot) 
-		  {
-		    memcpy(PulsePoT, &PowerSpectrum[ThisPoT * PoTLen + TOffset], PulsePoTLen*sizeof(float));
-		  } 
-		else 
-		  {
-		    for(i = 0; i < PulsePoTLen; i++) 
-		      {
-			PulsePoT[i] = PowerSpectrum[ThisPoT + (TOffset+i) * FftLength];
-		      }
-		  }
-		
-	    if(!SkipTriplet) 
-	      {
-		retval = find_triplets(PulsePoT,
-				       PulsePoTLen,
-				       (float)PoTInfo.TripletThresh,
-				       TOffset,
-				       ThisPoT);
-		if (retval)
-		  SETIERROR(retval,"from find_triplets()");
-	      }
-	    //#ifndef CUDAACC_EMULATION
-	    if(!SkipPulse) 
-	      {
-		retval = find_pulse(PulsePoT,
-				    PulsePoTLen,
-				    (float)PoTInfo.PulseThresh,
-				    TOffset,
-				    ThisPoT
-				    );
-		if (retval)
-		  SETIERROR(retval,"from find_pulse()");
-	      }
-	    //#endif //CUDAACC_EMULATION
-	    
-	    // At the end of each pulse PoT we update progress.  Progress
-	    // will thus get updted several times per frequency bin.
+	  
+	  // loop through frequencies
+	  for(; ThisPoT < FftLength; ThisPoT++) 
+	    {
+	      // loop through time for each frequency.  PulsePoTNum is
+	      // used only for progress calculation.
+	      for(TOffset = 0, PulsePoTNum = 1, TOffsetOK = true;
+		  TOffsetOK;
+		  PulsePoTNum++, TOffset += AdvanceBy) 
+		{
+		  
+		  // Create PowerOfTime array for pulse detection.  If there
+		  // are not enough points left in this PoT, adjust TOffset
+		  // to get the latest possible pulse PoT.
+		  if(TOffset + PulsePoTLen >= PoTLen) 
+		    {
+		      TOffsetOK = false;
+		      TOffset = PoTLen - PulsePoTLen;
+		    }
+		  if (use_transposed_pot) 
+		    {
+		      memcpy(PulsePoT, &PowerSpectrum[ThisPoT * PoTLen + TOffset], PulsePoTLen*sizeof(float));
+		    } 
+		  else 
+		    {
+		      for(i = 0; i < PulsePoTLen; i++) 
+			{
+			  PulsePoT[i] = PowerSpectrum[ThisPoT + (TOffset+i) * FftLength];
+			}
+		    }
+		  
+		  if(!SkipTriplet) 
+		    {
+		      retval = find_triplets(PulsePoT,
+					     PulsePoTLen,
+					     (float)PoTInfo.TripletThresh,
+					     TOffset,
+					     ThisPoT);
+		      if (retval)
+			SETIERROR(retval,"from find_triplets()");
+		    }
+		  //#ifndef CUDAACC_EMULATION
+		  if(!SkipPulse) 
+		    {
+		      retval = find_pulse(PulsePoT,
+					  PulsePoTLen,
+					  (float)PoTInfo.PulseThresh,
+					  TOffset,
+					  ThisPoT
+					  );
+		      if (retval)
+			SETIERROR(retval,"from find_pulse()");
+		    }
+		  //#endif //CUDAACC_EMULATION
+		  
+		  // At the end of each pulse PoT we update progress.  Progress
+		  // will thus get updted several times per frequency bin.
 #ifdef BOINC_APP_GRAPHICS
-	    if (!nographics())
-	      {
-		sah_graphics->local_progress = (((ThisPoT-1) * NumPulsePoTs) +
-						PulsePoTNum)                   *
-		  ProgressPerPulsePoT;
-	      }
+		  if (!nographics())
+		    {
+		      sah_graphics->local_progress = (((ThisPoT-1) * NumPulsePoTs) +
+						      PulsePoTNum)                   *
+			ProgressPerPulsePoT;
+		    }
 #endif
-	    if(!SkipTriplet) 
-	      {
-		progress += (ProgressUnitSize * TripletProgressUnits()) /
-		  (float)(FftLength - 1) / NumPulsePoTs;
-	      }
-	    if(!SkipPulse) 
-	      {
-		progress += (ProgressUnitSize * PulseProgressUnits(PulsePoTLen, FftLength - 1)) /
-		  (float)(FftLength - 1) / NumPulsePoTs;
-		
-	      }
-	    progress=std::min(progress,1.0); // prevent display of > 100%
-	    fraction_done(progress,remaining);
-	    
-	      }  // end loop through time for each frequency
-	    
-	    // At the end of each frequency bin we save state.
-	    analysis_state.PoT_activity = POT_DOING_PULSE;
-	    analysis_state.PoT_freq_bin = ThisPoT;
-	    retval = checkpoint();
-	    if (retval)
-	      SETIERROR(retval,"from checkpoint()");
-	    
-	  }   // end loop through frequencies
-	analysis_state.PoT_freq_bin = -1;
-	analysis_state.PoT_activity = POT_INACTIVE;
+		  if(!SkipTriplet) 
+		    {
+		      progress += (ProgressUnitSize * TripletProgressUnits()) /
+			(float)(FftLength - 1) / NumPulsePoTs;
+		    }
+		  if(!SkipPulse) 
+		    {
+		      progress += (ProgressUnitSize * PulseProgressUnits(PulsePoTLen, FftLength - 1)) /
+			(float)(FftLength - 1) / NumPulsePoTs;
+		      
+		    }
+		  progress=std::min(progress,1.0); // prevent display of > 100%
+		  fraction_done(progress,remaining);
+		  
+		}  // end loop through time for each frequency
+	      
+	      // At the end of each frequency bin we save state.
+	      analysis_state.PoT_activity = POT_DOING_PULSE;
+	      analysis_state.PoT_freq_bin = ThisPoT;
+	      retval = checkpoint();
+	      if (retval)
+		SETIERROR(retval,"from checkpoint()");
+	      
+	    }   // end loop through frequencies
+	  analysis_state.PoT_freq_bin = -1;
+	  analysis_state.PoT_activity = POT_INACTIVE;
 #ifdef USE_CUDA
-      }
+	}
 #endif //USE_CUDA
     }   // end looking for pulses			
-
+  
   if(b_gaussStarted) // process results late
     {
       //printf("late GaussBlock\r\n");
-
+      
       int flags = cudaAcc_fetchGaussfitFlags(FftLength, best_gauss->score);
-
+      
       if(flags>0)
 	cudaAcc_processGaussFit(FftLength, best_gauss->score);
     }
-
+  
   return (retval);   // no error return point
 }
 

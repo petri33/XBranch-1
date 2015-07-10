@@ -72,6 +72,7 @@ cudaEvent_t ac_reduce_partialEvent[8];
 cudaEvent_t meanDoneEvent;
 cudaEvent_t tripletsDoneEvent;
 cudaEvent_t pulseDoneEvent;
+cudaEvent_t pulseCalcDoneEvent;
 cudaEvent_t gaussDoneEvent;
 
 cudaStream_t fftstream0 = 0;
@@ -83,7 +84,8 @@ int cudaAcc_NumDataPoints;
 //int cuda_tmax=256;
 bool cuda_pinned = false;
 cudaStream_t cudapsStream[CUDA_MAXNUMSTREAMS];
-cudaStream_t cudaAutocorrStream[8];
+cudaStream_t cudaAutocorrStream;
+cudaStream_t gaussStream;
 
 
 extern __global__ void cudaAcc_summax32_kernel(float *input, float3* output, int iterations);
@@ -121,7 +123,8 @@ int cudaAcc_initialized()
 bool cudaAcc_setBlockingSync(int device) 
 {
   //CUDA_ACC_SAFE_CALL(cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync), false);
-  CUDA_ACC_SAFE_CALL(cudaSetDeviceFlags(cudaDeviceScheduleYield), false);
+  //CUDA_ACC_SAFE_CALL(cudaSetDeviceFlags(cudaDeviceScheduleYield), false);
+  CUDA_ACC_SAFE_CALL(cudaSetDeviceFlags(cudaDeviceScheduleSpin), false);
   
   return true;
 }
@@ -365,6 +368,7 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
   cudaEventCreateWithFlags(&meanDoneEvent, cudaEventDisableTiming);
   cudaEventCreateWithFlags(&tripletsDoneEvent, cudaEventDisableTiming);
   cudaEventCreateWithFlags(&pulseDoneEvent, cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&pulseCalcDoneEvent, cudaEventDisableTiming);
   cudaEventCreateWithFlags(&gaussDoneEvent, cudaEventDisableTiming);
 
   // events created
@@ -404,7 +408,7 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
   cudaAcc_init++;
   
   
-  cu_err = cudaMalloc((void**) &dev_WorkData, sizeof(*dev_WorkData) * NumDataPoints * PADVAL); // + 1/8 for find_pulse));
+  cu_err = cudaMalloc((void**) &dev_WorkData, 64*2*sizeof(*dev_WorkData) * NumDataPoints * PADVAL); // + 1/8 for find_pulse));
   if(cudaSuccess != cu_err) 
     {
       CUDA_ACC_SAFE_CALL_NO_SYNC("cudaMalloc((void**) &dev_WorkData");
@@ -419,7 +423,7 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
     } else { CUDAMEMPRINT(dev_best_potP,"cudaMalloc((void**) &dev_best_potP",NumDataPoints * PADVAL,sizeof(*dev_best_potP)); };
   cudaAcc_init++;
   
-  cu_err = cudaMalloc((void**) &dev_PowerSpectrum, sizeof(*dev_PowerSpectrum) * NumDataPoints * PADVAL);
+  cu_err = cudaMalloc((void**) &dev_PowerSpectrum, 2*sizeof(*dev_PowerSpectrum) * NumDataPoints * PADVAL);
   if(cudaSuccess != cu_err) 
     {
       CUDA_ACC_SAFE_CALL_NO_SYNC("cudaMalloc((void**) &dev_PowerSpectrum");
@@ -591,51 +595,17 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
   cudaAcc_NumDataPoints = NumDataPoints;
 #ifdef PINNED
   cudaMallocHost((void **)&tmp_small_PoT, NumDataPoints / 8 * sizeof(*tmp_small_PoT));
-  cudaMallocHost((void **)&PowerSpectrumSumMax, sizeof(*dev_PowerSpectrumSumMax) * NumDataPoints / 8);		
+  cudaMallocHost((void **)&PowerSpectrumSumMax, 2*sizeof(*dev_PowerSpectrumSumMax) * NumDataPoints / 8);		
 #else
   tmp_small_PoT = (float*) malloc(NumDataPoints / 8 * sizeof(*tmp_small_PoT));
   PowerSpectrumSumMax = (float3*) malloc(sizeof(*dev_PowerSpectrumSumMax) * NumDataPoints / 8);		
 #endif
   
-//  cu_err = cudaStreamCreate(&cudaAutocorrStream);
-//  if(cudaSuccess != cu_err) 
-//    {fprintf(stderr, "Autocorr stream create 0 failed\r\n"); return 1;}
-
-  cu_err = cudaStreamCreate(&cudaAutocorrStream[0]);
-  if(cudaSuccess != cu_err) 
-    {fprintf(stderr, "Autocorr stream create 0 failed\r\n"); return 1;}
-
-  cu_err = cudaStreamCreate(&cudaAutocorrStream[1]);
-  if(cudaSuccess != cu_err) 
-    {fprintf(stderr, "Autocorr stream create 1 failed\r\n"); return 1;}
-
-  cu_err = cudaStreamCreate(&cudaAutocorrStream[2]);
-  if(cudaSuccess != cu_err) 
-    {fprintf(stderr, "Autocorr stream create 2 failed\r\n"); return 1;}
-
-  cu_err = cudaStreamCreate(&cudaAutocorrStream[3]);
-  if(cudaSuccess != cu_err) 
-    {fprintf(stderr, "Autocorr stream create 3 failed\r\n"); return 1;}
-
-  cu_err = cudaStreamCreate(&cudaAutocorrStream[4]);
-  if(cudaSuccess != cu_err) 
-    {fprintf(stderr, "Autocorr stream create 4 failed\r\n"); return 1;}
-
-  cu_err = cudaStreamCreate(&cudaAutocorrStream[5]);
-  if(cudaSuccess != cu_err) 
-    {fprintf(stderr, "Autocorr stream create 5 failed\r\n"); return 1;} 
-
-  cu_err = cudaStreamCreate(&cudaAutocorrStream[6]);
-  if(cudaSuccess != cu_err) 
-    {fprintf(stderr, "Autocorr stream create 6 failed\r\n"); return 1;}
-
-  cu_err = cudaStreamCreate(&cudaAutocorrStream[7]);
-  if(cudaSuccess != cu_err) 
-    {fprintf(stderr, "Autocorr stream create 7 failed\r\n"); return 1;}
-
-  
   cudaStreamCreate(&fftstream0);
   cudaStreamCreate(&fftstream1);
+  cudaStreamCreate(&pulseStream);
+  cudaStreamCreate(&tripletStream);
+  cudaStreamCreate(&gaussStream);
 
   if(cudaAcc_initializeGaussfit(PoTInfo, gauss_pot_length, nsamples, gauss_null_chi_sq_thresh, gauss_chi_sq_thresh))
     {
@@ -673,7 +643,7 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
   if(gCudaDevProps.major >= 2)
     {
       size_t threadlimit = 0;
-      cudaThreadGetLimit(&threadlimit,cudaLimitStackSize);
+      cudaThreadGetLimit(&threadlimit, cudaLimitStackSize);
       fprintf(stderr,"Thread call stack limit is: %dk\n", (int)threadlimit/1024);
       //if(threadlimit < 10240)
       //{
@@ -705,82 +675,74 @@ int cudaAcc_InitializeAutocorrelation(int ac_fftlen)
   // Failure to initialise Cuda device memory for Autocorrelation isn't fatal, but we need to keep track of things...
   gCudaAutocorrelation = (ac_fftlen > 0); // initially assume we're going to do Autocorrelations on GPU if needed
 
-//  cudaAutoCorr_plan = 0; // cufftHandle is not a pointer. Cannot be set to "NULL"
-  cudaAutoCorr_plan[0] = 0; // cufftHandle is not a pointer. Cannot be set to "NULL"
-  cudaAutoCorr_plan[1] = 0; // cufftHandle is not a pointer. Cannot be set to "NULL"
-  cudaAutoCorr_plan[2] = 0; // cufftHandle is not a pointer. Cannot be set to "NULL"
-  cudaAutoCorr_plan[3] = 0; // cufftHandle is not a pointer. Cannot be set to "NULL"
-  cudaAutoCorr_plan[4] = 0; // cufftHandle is not a pointer. Cannot be set to "NULL"
-  cudaAutoCorr_plan[5] = 0; // cufftHandle is not a pointer. Cannot be set to "NULL"
-  cudaAutoCorr_plan[6] = 0; // cufftHandle is not a pointer. Cannot be set to "NULL"
-  cudaAutoCorr_plan[7] = 0; // cufftHandle is not a pointer. Cannot be set to "NULL"
+  cudaAutoCorr_plan = 0; // cufftHandle is not a pointer. Cannot be set to "NULL"
 
-  int ac_size = sizeof(float2)*ac_fftlen*4;
+  int ac_size = sizeof(float2)*ac_fftlen*4 + sizeof(float4);
   
+  cudaError_t err;
+  err = cudaMalloc(&dev_AutoCorrIn, ac_size*8);
+  if(cudaSuccess != err)
+    {
+      fprintf(stderr, "cudaMalloc error");
+      return 1;
+    }
+  err = cudaMalloc(&dev_AutoCorrOut, ac_size*8);
+  if(cudaSuccess != err)
+    {
+      fprintf(stderr, "cudaMalloc error");
+      return 1;
+    }
+
   if(gCudaAutocorrelation)
     {
+      cu_errf = cufftPlan1d(&cudaAutoCorr_plan, ac_fftlen*4, CUFFT_C2C, 8); //4N FFT method, batch of 8
+      if(cu_errf != CUFFT_SUCCESS)
+	{fprintf(stderr, "plan many failed %d\r\n", cu_errf); return 1;}
+
+      err = cudaStreamCreate(&cudaAutocorrStream);
+      if(cudaSuccess != err) 
+	{fprintf(stderr, "Autocorr stream create %d failed\r\n", 0); return 1;}
+      cufftSetCompatibilityMode(cudaAutoCorr_plan, CUFFT_COMPATIBILITY_NATIVE);
+      cufftSetStream(cudaAutoCorr_plan, cudaAutocorrStream);
+      dev_ac_partials = (float3 *) (dev_AutoCorrOut);
+
+      /*
       for(int i = 0; i < 8; i++)
 	{   
-	  cudaError_t err;
-	  err = cudaMalloc((void **)&dev_AutoCorrIn[i], ac_size);
-	  if(cudaSuccess != err)
-	    {
-	      fprintf(stderr, "cudaMalloc error %d", i);
-	      return 1;
-	    }
-	  err = cudaMalloc((void **)&dev_AutoCorrOut[i], ac_size);
-	  if(cudaSuccess != err)
-	    {
-	      fprintf(stderr, "cudaMalloc error %d", i);
-	      return 1;
-	    }
-	  err = cudaMallocHost((void **)&blockSums[i], 131072/256*sizeof(float3));
+	  //printf("Mallocing blockSums %d bytes\r\n", 131072/2/256*sizeof(float3));
+	  err = cudaMallocHost((void **)&(blockSums[i]), 131072/2/256*sizeof(float3));
 	  if(cudaSuccess != err) 
 	    {
-	      fprintf(stderr, "cudaMallocHost blockSums %d failed", i);
+	      fprintf(stderr, "cudaMallocHost blockSums %d failed", 0);
 	      return 1;
 	    }
-	}
-    }
-  
-  if(gCudaAutocorrelation)
-    {
-      //      cu_errf = cufftPlan1d(&cudaAutoCorr_plan, ac_fftlen*4, CUFFT_C2C, 1); //4N FFT method
-      //      if(CUFFT_SUCCESS != cu_errf) 
-      //	fprintf(stderr,"Not enough room for autocorrelation CuFFT plan 0(4NFFT method)\n");
-      //      cu_errf = cufftSetStream(cudaAutoCorr_plan, cudaAutocorrStream);
-      //      if(CUFFT_SUCCESS != cu_errf) 
-      //        fprintf(stderr, "cufftSetStream autocorr AutocorrStream failed");
-      for(int i = 0; i < 8; i++)
-	{
-	  cu_errf = cufftPlan1d(&cudaAutoCorr_plan[i], ac_fftlen*4, CUFFT_C2C, 1); //4N FFT method
-	  if(CUFFT_SUCCESS != cu_errf) 
-	    fprintf(stderr,"Not enough room for autocorrelation CuFFT plan %d(4NFFT method)\n", i);
-
-
-	  cu_errf = cufftSetStream(cudaAutoCorr_plan[i], cudaAutocorrStream[i]);
-	  if(CUFFT_SUCCESS != cu_errf) 
-	    fprintf(stderr, "cufftSetStream %d failed", i);
 	  
-	  cufftSetCompatibilityMode(cudaAutoCorr_plan[i], CUFFT_COMPATIBILITY_NATIVE);
-	  dev_ac_partials[i] = (float3 *) dev_AutoCorrOut[i];
+	  //	  blockSums[i] = (blockSums[0]) + i*131072/2/256;
 	}
+      */
+
+      //printf("Mallocing blockSums %d bytes\r\n", 8*131072/2/256*sizeof(float3));
+      cudaMallocHost((void **)&blockSums, 8*131072/2/256*sizeof(float3));
 
       if(CUFFT_SUCCESS != cu_errf) 
 	{
 	  fprintf(stderr,"Not enough room for autocorrelation\n");
 	  gCudaAutocorrelation = false;
 
-	  for(int i = 0; i < 8; i++)
-	    {
-	      if(dev_AutoCorrOut[i]) cudaFree(dev_AutoCorrOut[i]);  // If we can't do the fft, won't be needing the output either.
-	      if(dev_AutoCorrIn[i]) cudaFree(dev_AutoCorrIn[i]);  // If we can't do the output, won;t be needing the input either.
-	      if(blockSums[i]) cudaFreeHost(blockSums[i]);  // If we can't do the output, won;t be needing the input either.
-	      dev_AutoCorrIn[i]  = NULL;
-	      dev_AutoCorrOut[i] = NULL;
-	      blockSums[i] = NULL;
-	      cudaAutoCorr_plan[i] = 0; // cufftHandle is not a pointer. Cannot be set to "NULL"
-	    }
+	  if(dev_AutoCorrOut) cudaFree(dev_AutoCorrOut);  // If we can't do the fft, won't be needing the output either.
+	  if(dev_AutoCorrIn) cudaFree(dev_AutoCorrIn);  // If we can't do the output, won;t be needing the input either.
+	  dev_AutoCorrIn  = NULL;
+	  dev_AutoCorrOut = NULL;
+	  cufftDestroy(cudaAutoCorr_plan);
+	  cudaAutoCorr_plan = 0; // cufftHandle is not a pointer. Cannot be set to "NULL"
+	  cudaStreamDestroy(cudaAutocorrStream);
+	  //for(int i = 0; i < 8; i++)
+	  //  {
+	  //    if(blockSums[i])   cudaFreeHost(blockSums[i]);
+	  //    blockSums[i]       = NULL;
+	  //  }
+	  if(blockSums)   cudaFreeHost(blockSums);
+	    blockSums       = NULL;
 	  return 1;
 	}
 #if CUDART_VERSION >= 3000
@@ -796,33 +758,38 @@ void cudaAcc_free_AutoCorrelation()
 {
   //  if(cudaAutoCorr_plan) cufftDestroy(cudaAutoCorr_plan);
 
+  cudaDeviceSynchronize();
   gCudaAutocorrelation = false;
 
-  for(int i = 0; i < 8; i++)
-    {
-      if(cudaAutoCorr_plan[i]) cufftDestroy(cudaAutoCorr_plan[i]);
+  if(dev_AutoCorrOut) cudaFree(dev_AutoCorrOut);
+  if(dev_AutoCorrIn)  cudaFree(dev_AutoCorrIn);  
+  dev_AutoCorrIn  = NULL;
+  dev_AutoCorrOut = NULL;
+  //for(int i = 0; i < 8; i++)
+  //  {
+  //    if(blockSums[i])   cudaFreeHost(blockSums[i]);
+  //    blockSums[i]       = NULL;
+  // }
+  
+  if(blockSums)   cudaFreeHost(blockSums);
+  blockSums = NULL;
 
-      if(dev_AutoCorrOut[i]) cudaFree(dev_AutoCorrOut[i]);
-      if(dev_AutoCorrIn[i])  cudaFree(dev_AutoCorrIn[i]);  
-      if(blockSums[i])       cudaFreeHost(blockSums[i]);
-      
-      dev_AutoCorrIn[i]  = NULL;
-      dev_AutoCorrOut[i] = NULL;
-      blockSums[i]       = NULL;
-
-      cudaAutoCorr_plan[i] = 0; // cufftHandle is not a pointer. Cannot be set to "NULL"
-    }
+  cudaStreamDestroy(cudaAutocorrStream);
+  cufftDestroy(cudaAutoCorr_plan);
+  cudaAutoCorr_plan = 0; // cufftHandle is not a pointer. Cannot be set to "NULL"
 
   return;
 }
 
-#define CF(_ptr) do { cudaFree(_ptr);_ptr = NULL; } while (0);
+#define CF(_ptr) do { if(_ptr) cudaFree(_ptr);_ptr = NULL; } while (0);
 
 
 void cudaAcc_free() 
 {
   fprintf(stderr,"cudaAcc_free() called...\n");
   if(!cudaAcc_init) return;
+
+  cudaDeviceSynchronize();
   fprintf(stderr,"cudaAcc_free() running...\n");
   cudaAcc_free_pulse_find();
   fprintf(stderr,"cudaAcc_free() PulseFind freed...\n");
@@ -831,9 +798,12 @@ void cudaAcc_free()
   cudaAcc_free_AutoCorrelation();
   fprintf(stderr,"cudaAcc_free() AutoCorrelation freed...\n");
   
-  //cudaStreamDestroy(fftstream1);
-  //cudaStreamDestroy(fftstream0);
-  
+  cudaStreamDestroy(fftstream1);
+  cudaStreamDestroy(fftstream0);
+  cudaStreamDestroy(tripletStream);
+  cudaStreamDestroy(pulseStream);
+  cudaStreamDestroy(gaussStream);
+
   switch(cudaAcc_init) 
     {
     case 16:
@@ -881,25 +851,26 @@ void cudaAcc_free()
       //CUDA_ACC_SAFE_CALL(CF(dev_GaussFitResultsReordered2));
       //cudaAcc_deallocBlockSums(); // scans are not used at the moment
 #ifdef PINNED
-      fprintf(stderr, "1");
+      fprintf(stderr, "1,");
       cudaFreeHost(GaussFitResults);
-      fprintf(stderr, "2");
+      fprintf(stderr, "2,");
       cudaFreeHost(TripletResults);
-      fprintf(stderr, "3");
+      fprintf(stderr, "3,");
       cudaFreeHost(PulseResults);
-      fprintf(stderr, "4");
+      fprintf(stderr, "4,");
       cudaFreeHost(tmp_small_PoT);
-      fprintf(stderr, "5");
+      cudaFreeHost(PowerSpectrumSumMax);
+      fprintf(stderr, "5,");
       cudaFreeHost(tmp_PoTP);
-      fprintf(stderr, "6");
+      fprintf(stderr, "6,");
       cudaFreeHost(tmp_PoTT);
-      fprintf(stderr, "7");
+      fprintf(stderr, "7,");
       cudaFreeHost(tmp_PoTG);
-      fprintf(stderr, "8");
+      fprintf(stderr, "8,");
       cudaFreeHost(best_PoTP);
-      fprintf(stderr, "9");
+      fprintf(stderr, "9,");
       cudaFreeHost(best_PoTG);
-      fprintf(stderr, "10");
+      fprintf(stderr, "10,");
 #else
       free(GaussFitResults);	
       free(tmp_small_PoT);
@@ -907,18 +878,18 @@ void cudaAcc_free()
     }
   
   cudaAcc_fft_free();
-  fprintf(stderr, "10½");
+  fprintf(stderr, "10,");
   cudaAcc_init = 0;
   cmem_rtotal = 0;
 #if(CUDART_VERSION >= 4000)
-  fprintf(stderr, "11");
+  fprintf(stderr, "11,");
   cudaDeviceReset();
-  fprintf(stderr, "12");
+  fprintf(stderr, "12,");
 #else
   cudaThreadExit();
 #endif
   fprintf(stderr,"cudaAcc_free() DONE.\n");
   fprintf(stderr, "13");
-
+  CUDA_ACC_SAFE_CALL(cudaSetDeviceFlags(cudaDeviceScheduleYield), false);
 }
 #endif

@@ -202,7 +202,7 @@ FindSpikes2( int            ul_NumDataPoints,
              SETI_WU_INFO&  swi,
              float          total,
              float          temp, // maximum
-             int            pos  ) 
+             int            pos) 
 {
 
   // Here we extract the spikes_to_report highest power events,
@@ -213,7 +213,7 @@ FindSpikes2( int            ul_NumDataPoints,
   // k : marks current high power candidate while j walks on
   // m : marks the current tail of the high power hit "list"
   
-  if (swi.analysis_cfg.spikes_per_spectrum > 0) 
+  if(swi.analysis_cfg.spikes_per_spectrum > 0) 
     {    
       int        i = 0, 
 	j = 0, 

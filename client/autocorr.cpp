@@ -192,13 +192,13 @@ int FindAutoCorrelation_c(
   total = 0.0f;
 
   int len = ul_NumDataPoints/2;
-  MeanPower = blockSums[fft_num][0].x / ul_NumDataPoints;
+  MeanPower = blockSums[fft_num * 256].x / ul_NumDataPoints;
   
   if (swi.analysis_cfg.autocorr_per_spectrum != 1) SETIERROR(-1,"Cuda Autocorrelation only supports 1 autocorr_per_spectrum");
 
   // with 1 spike per spectrum Only need k = bin index with highest power...
-  k = (int)blockSums[fft_num][0].z;
-  temp = blockSums[fft_num][0].y;
+  k = (int)blockSums[fft_num * 256].z;
+  temp = blockSums[fft_num * 256].y;
   
   //  autocorr info
   ai.a.peak_power 	 = temp/MeanPower;

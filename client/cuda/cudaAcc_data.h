@@ -112,11 +112,9 @@ extern float* dev_NormMaxPower;
 extern float3* dev_PowerSpectrumSumMax;
 
 extern bool gCudaAutocorrelation;
-extern float2* dev_AutoCorrIn[8];
-extern float2* dev_AutoCorrOut[8];
-extern cufftHandle cudaAutoCorr_plan[8];
-//extern cufftHandle cudaAutoCorr_plan;
-//extern cudaStream_t cudaAutocorrStream[8];
+extern float2* dev_AutoCorrIn;
+extern float2* dev_AutoCorrOut;
+extern cufftHandle cudaAutoCorr_plan;
 
 extern float* dev_flagged;
 extern float* dev_outputposition;
