@@ -31,9 +31,12 @@
 
 #define DO_SMOOTH
 
+
 #if defined(__linux__)
+
 #include <cuda_runtime_api.h>
 #include <unistd.h>
+
 #endif
 
 #if defined(__APPLE__) || defined(__linux__) // Duplicate definitions in windows
@@ -333,6 +336,16 @@ int icfft;  // for debug
 #endif
 
 #ifdef USE_CUDA
+#if defined(__linux__)
+#include  <signal.h>
+#include <stdlib.h>
+__cdecl void INThandler(int sig)
+{
+  cudaDeviceReset();
+  exit(0);
+}
+#endif
+
 void initCudaDevice()
 {
   // Check the commandline args before going attempting to use CUDA
@@ -367,9 +380,14 @@ void initCudaDevice()
 	  boinc_temporary_exit(180,"Cuda device initialisation failed");
 	}
     }
+  
+#if defined(__linux__)
+  if(gSetiUseCudaDevice)
+    signal(SIGINT, INThandler);
+#endif
+
 }
 #endif //USE_CUDA
-
 
 
 int seti_analyze (ANALYSIS_STATE& state) 
@@ -388,6 +406,7 @@ int seti_analyze (ANALYSIS_STATE& state)
   
   SAFE_EXIT_CHECK;
 #ifdef USE_CUDA
+  signal(SIGINT, INThandler);
   initCudaDevice();
   //	// Check the commandline args before going attempting to use CUDA
   //	if(!bNoCUDA)
