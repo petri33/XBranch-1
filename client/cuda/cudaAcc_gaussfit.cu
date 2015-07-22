@@ -104,21 +104,21 @@ __device__ float cudaAcc_GetPeak(float * __restrict__ fp_PoT, int ul_TOffset, in
       float fw = F_weight[ul_TOffset - i];
       float fw2 = F_weight[ul_TOffset - (i+1)];
       float fw3 = F_weight[ul_TOffset - (i+2)];
-      f_sum.x += (*pp + *pp2 - f_MeanPower2) * fw; pp += ul_FftLength; pp2 -= ul_FftLength;
-      f_sum.y += (*pp + *pp2 - f_MeanPower2) * fw2; pp += ul_FftLength; pp2 -= ul_FftLength;
-      f_sum.z += (*pp + *pp2 - f_MeanPower2) * fw3; pp += ul_FftLength; pp2 -= ul_FftLength;
+      f_sum.x += (__ldg(pp) + __ldg(pp2) - f_MeanPower2) * fw; pp += ul_FftLength; pp2 -= ul_FftLength;
+      f_sum.y += (__ldg(pp) + __ldg(pp2) - f_MeanPower2) * fw2; pp += ul_FftLength; pp2 -= ul_FftLength;
+      f_sum.z += (__ldg(pp) + __ldg(pp2) - f_MeanPower2) * fw3; pp += ul_FftLength; pp2 -= ul_FftLength;
     }
 
 #pragma unroll 1
   for(; i < ul_TOffset; i++) 
     {
       float fw =  F_weight[ul_TOffset - i];
-      f_sum.w += (*pp + *pp2 - f_MeanPower2) * fw; pp += ul_FftLength; pp2 -= ul_FftLength;
+      f_sum.w += (__ldg(pp) + __ldg(pp2) - f_MeanPower2) * fw; pp += ul_FftLength; pp2 -= ul_FftLength;
     }
 
   //last
   float fw =  F_weight[ul_TOffset - i];
-  f_sum.x += ((*pp) - f_MeanPower) * fw; pp += ul_FftLength;
+  f_sum.x += (__ldg(pp) - f_MeanPower) * fw; pp += ul_FftLength;
 
   f_sum.x += f_sum.y;
   f_sum.x += f_sum.z + f_sum.w;
@@ -163,7 +163,7 @@ __device__ float cudaAcc_GetChiSq(float * __restrict__ fp_PoT, const int ul_FftL
       int a = ul_TOffset - i, b = i - ul_TOffset;
       int fwi = i < ul_TOffset ? a : b;      
 
-      float f_PredictedPower = f_PeakPower * __ldg(&F_weight[fwi]);		
+      float f_PredictedPower = f_PeakPower * (F_weight[fwi]);		
       float recip_noise = 1.0f/(sqrt(f_PredictedPower) + 0.5f);
       float PoTval = __ldg(fp_PoT) * recip_MeanPower - 1.0f; fp_PoT += ul_FftLength;
       f_ChiSq += (recip_noise*sqrf(PoTval - f_PredictedPower));
@@ -193,8 +193,8 @@ __device__ float cudaAcc_GetTrueMean(float * __restrict__ fp_PoT, int ul_PowerLe
 #pragma unroll 8
   for(i = i_start; i < (i_lim-3); i+=4) 
     {
-      a += *pp + *(pp+ul_FftLength); 
-      b += *(pp+2*ul_FftLength) + *(pp+3*ul_FftLength); 
+      a += __ldg(pp) + __ldg(pp+ul_FftLength); 
+      b += __ldg(pp+2*ul_FftLength) + __ldg(pp+3*ul_FftLength); 
       pp += 4*ul_FftLength;
     }       
   f_ExcludePower = a + b;
@@ -202,7 +202,7 @@ __device__ float cudaAcc_GetTrueMean(float * __restrict__ fp_PoT, int ul_PowerLe
 #pragma unroll 1
   for(; i < i_lim; i++) 
     {
-      f_add += *pp; pp += ul_FftLength;
+      f_add += __ldg(pp); pp += ul_FftLength;
     }
   f_ExcludePower += f_add;
   return((f_TotalPower - f_ExcludePower) / (ul_PowerLen - (i_lim - i_start)));
@@ -222,9 +222,9 @@ __device__ float cudaAcc_GetTrueMean2(float* __restrict__ fp_PoTPrefixSum, int u
   i_start = max(ul_TOffset - ul_ExcludeLen -1, -1);
   i_lim = min(ul_TOffset + ul_ExcludeLen, ul_PowerLen - 1);
   
-  f_ExcludePower = fp_PoTPrefixSum[i_lim * ul_FftLength];
+  f_ExcludePower = __ldg(&fp_PoTPrefixSum[i_lim * ul_FftLength]);
   if(i_start >= 0)
-    f_ExcludePower -= fp_PoTPrefixSum[i_start * ul_FftLength]; 
+    f_ExcludePower -= __ldg(&fp_PoTPrefixSum[i_start * ul_FftLength]); 
   
   return((f_TotalPower - f_ExcludePower) / (ul_PowerLen - (i_lim - i_start)));
 }
@@ -243,10 +243,13 @@ float cudaAcc_GetPeakScaleFactor(float f_sigma)
   // A = sum * (1 / SUM[x from -sigma to +sigma] of (e^(-x^2 / sigma^2))^2.
   // The factor by which we multiply the sum is the PeakScaleFactor.
   // It is completely determined by sigma.
-  
+
   int i, i_s = static_cast<int>(floor(f_sigma+0.5));
   float f_sigma_sq = f_sigma*f_sigma;
   float f_sum = 0.0;
+
+printf("GPSF %f %d\r\n", f_sigma, i_s);
+
 #pragma unroll 3  
   for(i = 1; i <= i_s; i++) 
     {
@@ -292,17 +295,18 @@ __global__ void GetFixedPoT_kernel(int offset)
   float4 *ppp = &((float4 *)fp_PowerSpectrum)[1048576 / 64 * ul_PoT_i];
 
   int i = 0;
-
+  
+#pragma unroll 1
   for(; i < (ul_PoTChunkSize-3); i += 4) 
     {
       float4 p1, p2;
-      p1 = *ppp; p2 = *(ppp+4*ul_FftLength/4); ppp += ul_FftLength/4; 
+      p1 = __ldg(ppp); p2 = __ldg(ppp+4*ul_FftLength/4); ppp += ul_FftLength/4; 
       partials1 += p1.x + p2.x; 
       partials2 += p1.y + p2.y; 
       partials3 += p1.z + p2.z; 
       partials4 += p1.w + p2.w; 
       ppp += ul_FftLength/4;
-      p1 = *ppp; p2 = *(ppp+4*ul_FftLength/4); ppp += ul_FftLength/4; 
+      p1 = __ldg(ppp); p2 = __ldg(ppp+4*ul_FftLength/4); ppp += ul_FftLength/4; 
       partials1 += p1.x + p2.x; 
       partials2 += p1.y + p2.y; 
       partials3 += p1.z + p2.z; 
@@ -315,7 +319,7 @@ __global__ void GetFixedPoT_kernel(int offset)
   while(i++ < ul_PoTChunkSize)
     {
       float4 p1, p2;
-      p1 = *ppp; ppp += ul_FftLength/4; 
+      p1 = __ldg(ppp); ppp += ul_FftLength/4; 
       partials1 += p1.x; 
       partials2 += p1.y; 
       partials3 += p1.z; 
@@ -349,13 +353,13 @@ __global__ void NormalizePoT_kernel(void)
   float2 f_TotalPower = {0,0}, f_TotalPower2 = {0,0};
   register float2 a[D];
   register float2 b[64];
-#pragma unroll
+#pragma unroll 
   for(int i = 0; i < 64; i += D) 
     {
 #pragma unroll
       for(int j = 0; j < D; j++)
 	{
-          b[i+j] = a[j] = *pp; *pp += ul_FftLength/NPK_B; //fp_PoT[(i+j) * ul_FftLength/NPK_B];
+          b[i+j] = a[j] = __ldg(pp); pp += ul_FftLength/NPK_B; //fp_PoT[(i+j) * ul_FftLength/NPK_B];
 	}
   
 #pragma unroll
@@ -395,6 +399,7 @@ __global__ void NormalizePoT_kernel(void)
 
   float2 f_NormMaxPower = {0,0}, f_NormMaxPower2 = {0,0};
   float2 sum = {0,0}, sum2 = {0,0};
+
   for(int i = 0; i < 64; i+=2) 
     {
       float2 PoT  = make_float2(b[i].x * fr_MeanPower.x, b[i].y * fr_MeanPower.y);
@@ -442,7 +447,7 @@ __global__ void NormalizePoT_kernel(void)
     {
 #pragma unroll
       for(int j = 0; j < D; j++)
-        b[i+j] = a[j] = fp_PoT[(i+j) * ul_FftLength];
+        b[i+j] = a[j] = __ldg(&fp_PoT[(i+j) * ul_FftLength]);
   
 #pragma unroll
       for(int j = 0; j < (D>>1); j++)
@@ -467,6 +472,7 @@ __global__ void NormalizePoT_kernel(void)
 
   float f_NormMaxPower = 0, f_NormMaxPower2 = 0;
   float sum = 0, sum2 = 0;
+
   for(int i = 0; i < 64; i+=2) 
     {
       float PoT  = b[i] * fr_MeanPower;
@@ -560,7 +566,7 @@ __device__ float cudaAcc_calc_GaussFit_score_cached(float chisqr, float null_chi
 }
 
 template <int ul_FftLength>
-__launch_bounds__(128,4)
+__launch_bounds__(4*GFK_BLOCK,4)
 __global__ void GaussFit_kernel(float best_gauss_score, result_flag* flags, bool noscore) 
 {
   if(blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.y == 0 && threadIdx.x == 0) // reset flags
@@ -574,7 +580,7 @@ __global__ void GaussFit_kernel(float best_gauss_score, result_flag* flags, bool
   if (ul_PoT >= ul_FftLength) return;
   if (ul_TOffset >= cudaAcc_GaussFit_settings.GaussTOffsetStop) return;
   
-  float* fp_PoT = &cudaAcc_GaussFit_settings.dev_PoTG[ul_PoT];
+  float *fp_PoT = &cudaAcc_GaussFit_settings.dev_PoTG[ul_PoT];
   float f_null_hyp;
   float4 * __restrict__ resp = &cudaAcc_GaussFit_settings.dev_GaussFitResults[ul_TOffset * ul_FftLength + ul_PoT];
   
