@@ -10,8 +10,8 @@ const double SPLITTER=(1<<BSPLIT)+1;
 #define N_TIMES 8
 #define NB 3
 //64
-#define THREADS 64
-#define TB 6
+#define THREADS 256
+#define TB 8
 
 
 inline float2 splitd(double a) 

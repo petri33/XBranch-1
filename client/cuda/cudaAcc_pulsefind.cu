@@ -32,7 +32,10 @@
 // 128 x2 fast
 // 256 x3 ? before
 // pulsefind
-#define PFTHR 128
+//#define PFTHR 128
+#define PFTHR 64
+
+#define PFT2 1024
 
 //triplets 128 o
 #define FTKTHR 128
@@ -124,12 +127,12 @@ __device__ float mean[262144];
 
 
 template <int ul_FftLength, int blockx>
-__global__ void __launch_bounds__(FTKTHR, 8)
+__global__ void __launch_bounds__(FTKTHR, 4)
 calculate_mean_kernel(int len_power, int AdvanceBy, int offset) 
 {
   int ul_PoT = blockIdx.x * blockx + threadIdx.x;
   int y = blockIdx.y * blockDim.y + threadIdx.y;
-  if((ul_PoT < 1) | (ul_PoT >= ul_FftLength))
+  if((ul_PoT < 1) || (ul_PoT >= ul_FftLength))
     {
       if(ul_PoT < 1)
         mean[ul_PoT+y*ul_FftLength] = 0;
@@ -208,13 +211,13 @@ calculate_mean_kernel(int len_power, int AdvanceBy, int offset)
 
 
 template <int ul_FftLength, int blockx, int len_power>
-__global__ void __launch_bounds__(FTKTHR, 8)
+__global__ void __launch_bounds__(FTKTHR, 4)
 calculate_mean_kernel(int AdvanceBy, int offset) 
 {
   int ul_PoT = blockIdx.x * blockx + threadIdx.x;
   int y = blockIdx.y * blockDim.y + threadIdx.y;
   
-  if((ul_PoT < 1) | (ul_PoT >= ul_FftLength))
+  if((ul_PoT < 1) || (ul_PoT >= ul_FftLength))
     {
       if(ul_PoT < 1)
         mean[ul_PoT+y*ul_FftLength] = 0;
@@ -239,7 +242,7 @@ calculate_mean_kernel(int AdvanceBy, int offset)
 #define D 16
   register float a[D];
 
-#pragma unroll 1
+#pragma unroll 2
   for(; i < (len_power - (D-1)); i += D) 
     {
 #pragma unroll
@@ -421,58 +424,57 @@ find_triplets_kernel(float triplet_thresh, int len_power, int AdvanceBy, int off
       rflags->has_results = 0;
       rflags->error = 0;
     }
-  
+
   int ul_PoT = blockIdx.x * blockx + threadIdx.x;
-  if ((ul_PoT < 1) | (ul_PoT >= ul_FftLength)) return; // Original find_triplets, omits first element
-  
+  if ((ul_PoT < 1) || (ul_PoT >= ul_FftLength)) return; // Original find_triplets, omits first element
+
   // Clear the result array
   float       * __restrict__ power   = cudaAcc_PulseFind_settings.power_ft + offset;
   float4      * __restrict__ results = cudaAcc_PulseFind_settings.resultsT;
-  
+
   int y = blockIdx.y * blockDim.y + threadIdx.y;
   int y2 = y + y;
-  
+
   int PoTLen = (1024*1024) / ul_FftLength;
   int TOffset = y * AdvanceBy;
   if(TOffset >= (PoTLen - len_power)) 
     {
       TOffset = PoTLen - len_power;
     }
-  
+
   results = &results[AT_XY(ul_PoT, y2, ul_FftLength)];
   results[0] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
   results[ul_FftLength] = make_float4(0.0f, 0.0f, 0.0f, 0.0f); 
-  
+
   float thresh = triplet_thresh;
   float mean_power = mean[ul_PoT+y*ul_FftLength];
   thresh *= mean_power;
   float * __restrict__ pp = &power[AT(0)];
   float * __restrict__ ppp = pp;
-  
+
   // MAXTRIPLETS_ABOVE_THESHOLD must be odd to prevent bank conflicts!
-  
+
   __shared__ int binsAboveThreshold[blockx][MAX_TRIPLETS_ABOVE_THRESHOLD];
   int *batx = &binsAboveThreshold[threadIdx.x][0];
   int i, n, numBinsAboveThreshold = 0, p, q;
   float midpoint, peak_power, period;
-  
-#define UNRL 8
-  for(i = 0; i < (len_power - (UNRL-1)); i += UNRL) 
-    for(int j = 0; j < UNRL; j++)
-      {
-	if((*pp) >= thresh) 
-	  {
-	    if(numBinsAboveThreshold == MAX_TRIPLETS_ABOVE_THRESHOLD) 
-	      {
-		rflags->error = CUDA_ERROR_TRIPLETS_ABOVE_THRESHOLD; // Reporting Error
-		return;
-	      }
-	    batx[numBinsAboveThreshold] = i+j;
-	    numBinsAboveThreshold++;
-	  }
-	pp += ul_FftLength;
-      }
-  
+
+//#pragma unroll 8
+  for(i = 0; i < (len_power - 7); i += 8) 
+    for(int j = 0; j < 8; j++)
+    {
+      if((*pp) >= thresh) 
+	{
+	  if(numBinsAboveThreshold == MAX_TRIPLETS_ABOVE_THRESHOLD) 
+	    {
+	      rflags->error = CUDA_ERROR_TRIPLETS_ABOVE_THRESHOLD; // Reporting Error
+	      return;
+	    }
+	  batx[numBinsAboveThreshold] = i+j;
+	  numBinsAboveThreshold++;
+	}
+      pp += ul_FftLength;
+    }
 #pragma unroll 1
   for( ; i < len_power; i++) 
     {
@@ -494,7 +496,7 @@ find_triplets_kernel(float triplet_thresh, int len_power, int AdvanceBy, int off
     { /* THIS CONDITION IS TRUE ONLY once every 300 KERNEL LAUNCH*/
       int already_reported_flag = 0;
       // TODO: Use Texture for reads from power[], Random Reads
-      
+
       for(i = 0; i < (numBinsAboveThreshold - 1); i++) 
 	{
 	  int tmp = batx[i];
@@ -502,7 +504,7 @@ find_triplets_kernel(float triplet_thresh, int len_power, int AdvanceBy, int off
 	  for(n = i + 2; n < numBinsAboveThreshold; n++) 
 	    {
 	      int tmp2 = batx[n];
-	      
+
 	      int midfi = (tmp+tmp2)>>1; // new
 	      
 	      /* Get the peak power of this triplet */
@@ -513,50 +515,51 @@ find_triplets_kernel(float triplet_thresh, int len_power, int AdvanceBy, int off
 	      
 	      p = tmp;
 	      pp = ppp + tmp*ul_FftLength; //&power[AT(p)];
-	      while(((*pp) >= thresh) & (p <= midfi)) 
+	      while(((*pp) >= thresh) && (p <= midfi)) 
 		{    /* Check if there is a pulse "off" in between init and midpoint */
 		  p++; pp += ul_FftLength;
 		}
 	      
 	      q = midfi + 1;
 	      pp = ppp + q*ul_FftLength; //&power[AT(q)];
-	      while(((*pp) >= thresh) & (q <= tmp2)) 
+	      while(((*pp) >= thresh) && (q <= tmp2)) 
 		{    /* Check if there is a pulse "off" in between midpoint and end */
 		  q++; pp += ul_FftLength;
 		}
 	      
-	      if((p >= midfi) | (q >= tmp2)) 
+	      if(p >= midfi || q >= tmp2) 
 		{
 		  /* if this pulse doesn't have an "off" between all the three spikes, it's dropped */
 		} 
 	      else 
                 {
 		  float midfip  = (ppp[midfi * ul_FftLength]); //(power[AT(midfi)]);
-		  midpoint = (tmp+tmp2)*0.5f;
-		  period = (float)fabs((tmp-tmp2)*0.5f);
-		  if(midfip >= thresh) 
-		    {
-		      if(already_reported_flag >= 2)	
-			{
-			  rflags->error = CUDA_ERROR_TRIPLETS_DUPLICATE_RESULT; // Reporting Error, more than one result per PoT, redo the calculations on CPU
-			  return;
-			}
-		      
-		      if(midfip > peak_power)
-			peak_power = midfip;
-		      
-		      results[already_reported_flag == 0 ? 0 : ul_FftLength] = make_float4(peak_power/mean_power, mean_power, period, midpoint);
-		      rflags->has_results = 1; // Mark for download <- VERY RARE SITUATION
-		      already_reported_flag++;
-		    }
-		  
+		  //if((midpoint - midff) > 0.1f) 
 		  if((tmp ^ tmp2) & 1) // one of them is odd
-		    {    /* then it's spread among two bins */
-		      midfip = (ppp[(midfi+1) * ul_FftLength]); 
-
-		      if(midfip >= thresh) 
+		    {    /* if it's spread among two bins */
+		      midpoint = (tmp+tmp2)*0.5f;
+ 		      period = (float)fabs((tmp-tmp2)*0.5f);
+		      float midfip2 = (ppp[(midfi+1) * ul_FftLength]); // prefetch second mid bin
+		      if(midfip >= thresh ) 
 			{
 			  if(already_reported_flag >= 2)	
+			    {
+			      rflags->error = CUDA_ERROR_TRIPLETS_DUPLICATE_RESULT; // Reporting Error, more than one result per PoT, redo the calculations on CPU
+			      return;
+			    }
+
+			  if(midfip > peak_power)
+			    peak_power = midfip;
+			  
+			  results[already_reported_flag == 0 ? 0 : ul_FftLength] = make_float4(peak_power/mean_power, mean_power, period, midpoint);
+			  rflags->has_results = 1; // Mark for download <- VERY RARE SITUATION
+			  already_reported_flag++;
+			}
+
+		      midfip = midfip2; //ppp[(midfi+1)*ul_FftLength]; //(power[AT(midfi + 1)]);
+		      if(midfip >= thresh) 
+			{
+			  if (already_reported_flag >= 2)	
 			    {
 			      rflags->error = CUDA_ERROR_TRIPLETS_DUPLICATE_RESULT; // Reporting Error, more than one result per PoT, redo the calculations on CPU
 			      return;
@@ -571,6 +574,26 @@ find_triplets_kernel(float triplet_thresh, int len_power, int AdvanceBy, int off
 			}
 		      
 		    } 
+		  else 
+		    {            /* otherwise just check the single midpoint bin */
+		      if(midfip >= thresh) 
+			{
+			  if(already_reported_flag >= 2)	
+			    {
+			      rflags->error = CUDA_ERROR_TRIPLETS_DUPLICATE_RESULT; // Reporting Error, more than one result per PoT, redo the calculations on CPU
+			      return;
+			    }
+			  
+			  midpoint = (tmp+tmp2)*0.5f;
+	                  period = (float)fabs((tmp-tmp2)*0.5f);
+			  if(midfip > peak_power)
+			    peak_power = midfip;
+			  
+			  results[already_reported_flag == 0 ? 0 : ul_FftLength] = make_float4(peak_power/mean_power, mean_power, period, midpoint);
+			  rflags->has_results = 1; // Mark for download <- VERY RARE SITUATION
+			  already_reported_flag++;
+			}
+		    }
 		}
 	    }
 	}
@@ -590,7 +613,7 @@ find_triplets_kernel(float triplet_thresh, int AdvanceBy, int offset)
     }
 
   int ul_PoT = blockIdx.x * blockx + threadIdx.x;
-  if ((ul_PoT < 1) | (ul_PoT >= ul_FftLength)) return; // Original find_triplets, omits first element
+  if ((ul_PoT < 1) || (ul_PoT >= ul_FftLength)) return; // Original find_triplets, omits first element
 
   int PoTLen = (1024*1024) / ul_FftLength;
 //  int PoTLen = cudaAcc_PulseFind_settings.NumDataPoints / ul_FftLength;
@@ -629,22 +652,20 @@ find_triplets_kernel(float triplet_thresh, int AdvanceBy, int offset)
 
   pp = ppp;
 
-#define UNRL 8
-  for(i = 0; i < (len_power - (UNRL-1)); i += UNRL) 
-    for(int j = 0; j < UNRL; j++)
-      {
-	if((*pp) >= thresh) 
-	  {
-	    if(numBinsAboveThreshold == MAX_TRIPLETS_ABOVE_THRESHOLD) 
-	      {
-		rflags->error = CUDA_ERROR_TRIPLETS_ABOVE_THRESHOLD; // Reporting Error
-		return;
-	      }
-	    batx[numBinsAboveThreshold] = i+j;
-	    numBinsAboveThreshold++;
-	  }
-	pp += ul_FftLength;
-      }
+  for(i = 0; i < len_power; i++) 
+    {
+      if((*pp) >= thresh) 
+	{
+	  if(numBinsAboveThreshold == MAX_TRIPLETS_ABOVE_THRESHOLD) 
+	    {
+	      rflags->error = CUDA_ERROR_TRIPLETS_ABOVE_THRESHOLD; // Reporting Error
+	      return;
+	    }
+	  batx[numBinsAboveThreshold] = i;
+	  numBinsAboveThreshold++;
+	}
+      pp += ul_FftLength;
+    }
   
   /* Check each bin combination for a triplet */
   if(numBinsAboveThreshold > 2) 
@@ -670,19 +691,19 @@ find_triplets_kernel(float triplet_thresh, int AdvanceBy, int offset)
 	      
 	      p = tmp;
 	      pp = ppp + tmp*ul_FftLength; //&power[AT(p)];
-	      while(((*pp) >= thresh) & (p <= midfi)) 
+	      while(((*pp) >= thresh) && (p <= midfi)) 
 		{    /* Check if there is a pulse "off" in between init and midpoint */
 		  p++; pp += ul_FftLength;
 		}
 	      
 	      q = midfi + 1;
 	      pp = ppp + q*ul_FftLength; //&power[AT(q)];
-	      while(((*pp) >= thresh) & (q <= tmp2)) 
+	      while(((*pp) >= thresh) && (q <= tmp2)) 
 		{    /* Check if there is a pulse "off" in between midpoint and end */
 		  q++; pp += ul_FftLength;
 		}
 	      
-	      if((p >= midfi) | (q >= tmp2)) 
+	      if(p >= midfi || q >= tmp2) 
 		{
 		  /* if this pulse doesn't have an "off" between all the three spikes, it's dropped */
 		} 
@@ -815,7 +836,7 @@ int cudaAcc_fetchTripletAndPulseFlags(bool SkipTriplet, bool SkipPulse, int Puls
     {
       cudaEventSynchronize(pulseDoneEvent); // Wait for Pflags
 
-      if((Pflags->has_best_pulse > 0) | (Pflags->has_report_pulse > 0)) 
+      if(Pflags->has_best_pulse > 0 || Pflags->has_report_pulse > 0) 
 	{
 	  int PoTLen = cudaAcc_NumDataPoints / FftLength;
 	  int PoTStride = (( (PulsePoTLen == PoTLen) ? 1: PoTLen/AdvanceBy) + 1) * AdvanceBy;
@@ -1018,7 +1039,7 @@ template <int num_adds>
 __device__ float cudaAcc_t_funct(int di, int j, int PulseMax, float *t_funct_cache) 
 {
   PulseMax = 40960; // help compiler
-  return (t_funct_cache[(j * CUDA_ACC_FOLDS_COUNT* PulseMax) + di]); //
+  return __ldg(&t_funct_cache[(j * CUDA_ACC_FOLDS_COUNT* PulseMax) + di]); //
 }
 
 template <int num_adds>
@@ -1026,54 +1047,67 @@ __device__ float cudaAcc_t_funct_ldg(int di, int j, int PulseMax, float *t_funct
 {
   PulseMax = 40960; // help compiler
   	   
-  return (t_funct_cache[(j * CUDA_ACC_FOLDS_COUNT* PulseMax) +  di]); //
+  return __ldg(&t_funct_cache[(j * CUDA_ACC_FOLDS_COUNT* PulseMax) +  di]); //
 }
 
 
 
-
 template <int fft_len>
-__device__ float cudaAcc_sumtop2(float *tab, float* __restrict__ dest, int di, float *tmp0) 
+__device__ __forceinline__ float cudaAcc_sumtop2(float *tab, float* __restrict__ dest, int di, float *tmp0) 
 {
-  float sum, tmax, tmax2;
   int   i = 0;
   float * __restrict__ one = tab;
   float * __restrict__ two = tmp0; //(float *)((char *)tab + tmp0);// * fft_len * sizeof(float));
-  tmax = 0.0f, tmax2 = 0.0f;
+  float tmax = 0.0f;
 
   int n = sizeof(float)*fft_len;
   
-
-#define UNRL 16
+#define UNRL 10
+#pragma unroll 1
   for( ; i < (di - (UNRL-1)); i += UNRL) 
     {
       float a[UNRL];
-      for(int j = 0; j < UNRL; j += 2)
+      for(int j = 0; j < UNRL; j++)
 	{
-	  a[j+0] = *one + *two; one = (float *)((char *)one + n); two = (float *)((char *)two + n);
-	  a[j+1] = *one + *two; one = (float *)((char *)one + n); two = (float *)((char *)two + n);
-	  *dest = a[j+0]; dest = (float *)((char *)dest + n); tmax = max(tmax, a[j+0]);		
-	  *dest = a[j+1]; dest = (float *)((char *)dest + n); tmax2 = max(tmax2, a[j+1]);		
+	  a[j] = *one; one = (float *)((char *)one + n); 
+	}
+	
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j] += *two; two = (float *)((char *)two + n);
+	}
+	
+      for(int j = 0; j < UNRL; j++)
+	{
+	  *dest = a[j]; dest = (float *)((char *)dest + n); tmax = max(tmax, a[j]);		
 	}
     }
 
 #define UNRL 4
+#pragma unroll 1
   for( ; i < (di - (UNRL-1)); i += UNRL) 
     {
       float a[UNRL];
-      for(int j = 0; j < UNRL; j += 2)
+      for(int j = 0; j < UNRL; j++)
 	{
-	  a[j+0] = *one + *two; one = (float *)((char *)one + n); two = (float *)((char *)two + n);
-	  a[j+1] = *one + *two; one = (float *)((char *)one + n); two = (float *)((char *)two + n);
-	  *dest = a[j+0]; dest = (float *)((char *)dest + n); tmax = max(tmax, a[j+0]);		
-	  *dest = a[j+1]; dest = (float *)((char *)dest + n); tmax2 = max(tmax2, a[j+1]);		
+	  a[j] = *one; one = (float *)((char *)one + n);
+	}
+	
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j] += *two; two = (float *)((char *)two + n);
+	}
+	
+      for(int j = 0; j < UNRL; j++)
+	{
+	  *dest = a[j]; dest = (float *)((char *)dest + n); tmax = max(tmax, a[j]);		
 	}
     }
 
 #pragma unroll 1
   for( ; i < di; i++ ) 
       {
-	sum  = *one + *two;
+	float sum  = *one + *two;
 	one = (float *)((char *)one + n);
 	two = (float *)((char *)two + n);
 	*dest = sum;
@@ -1081,143 +1115,279 @@ __device__ float cudaAcc_sumtop2(float *tab, float* __restrict__ dest, int di, f
 	dest = (float *)((char *)dest + n);
       }
 
-  tmax = max(tmax, tmax2);
   return tmax;
 }
 
 
 template <int fft_len>
-__device__ float cudaAcc_sumtop3(float *tab, float * __restrict__ dest, int di, float *tmp0, float *tmp1) 
+__device__ __forceinline__ float cudaAcc_sumtop3(float *tab, float * __restrict__ dest, int di, float *tmp0, float *tmp1) 
 {
-  float sum, tmax, tmax2;
   int   i = 0;
   float * __restrict__ one = tab;
   float * __restrict__ two = tmp0; //(float *)((char *)tab + tmp0);// * fft_len * sizeof(float));
   float * __restrict__ three = tmp1; //(float *)((char *)tab + tmp1);// * fft_len * sizeof(float));
-  tmax = 0.0f, tmax2 = 0.0f;
+  float tmax = 0.0f;
 
   int n = sizeof(float)*fft_len;
-  
 
 #define UNRL 8
+#pragma unroll 1
   for( ; i < (di - (UNRL-1)); i += UNRL) 
     {
       float a[UNRL];
-      
-      for(int j = 0; j < UNRL; j += 2)
+      for(int j = 0; j < UNRL; j++)
 	{
-	  a[j+0] = *one + *two + *three; one = (float *)((char *)one + n); two = (float *)((char *)two + n); three = (float *)((char *)three + n);
-	  a[j+1] = *one + *two + *three; one = (float *)((char *)one + n); two = (float *)((char *)two + n); three = (float *)((char *)three + n);
-	  
-	  *dest = a[j+0]; dest = (float *)((char *)dest + n); tmax = max(tmax, a[j+0]);
-	  *dest = a[j+1]; dest = (float *)((char *)dest + n); tmax2 = max(tmax2, a[j+1]);
+	  a[j] = *one; one = (float *)((char *)one + n);
+	}
+	
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j] += *two; two = (float *)((char *)two + n);
+	}
+	
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j] += *three; three = (float *)((char *)three + n);
+	}
+	
+      for(int j = 0; j < UNRL; j++)
+	{
+	  *dest = a[j]; dest = (float *)((char *)dest + n); tmax = max(tmax, a[j]);		
 	}
     }
 
 #pragma unroll 1
   for( ; i < di; i++ ) 
       {
-	sum  = *one + *two + *three;
-	one = (float *)((char *)one + n);
-	two = (float *)((char *)two + n);
-	three = (float *)((char *)three + n);
+	float sum  = *one; one   = (float *)((char *)one + n);
+	sum += *two;       two   = (float *)((char *)two + n);
+	sum += *three;     three = (float *)((char *)three + n);
 	*dest = sum;
 	tmax = max(tmax, sum);		
 	dest = (float *)((char *)dest + n);
       }
 
-  tmax = max(tmax, tmax2);
   return tmax;
 }
 
 
 template <int fft_len>
-__device__ float cudaAcc_sumtop4(float * tab, float * __restrict__ dest, int di, float *tmp0, float *tmp1, float *tmp2) 
+__device__ __forceinline__ float cudaAcc_sumtop4(float * tab, float * __restrict__ dest, int di, float *tmp0, float *tmp1, float *tmp2) 
 {
-  float tmax, tmax2;
   int   i = 0;
   float * __restrict__ one = tab;
   float * __restrict__ two   = tmp0; //(float *)((char *)tab + tmp0);// * fft_len * sizeof(float));
   float * __restrict__ three = tmp1; //(float *)((char *)tab + tmp1);// * fft_len * sizeof(float));
   float * __restrict__ four  = tmp2; //(float *)((char *)tab + tmp2);// * fft_len * sizeof(float));
-  tmax = 0.0f, tmax2 = 0.0f;
+  float tmax = 0.0f, tmax2 = 0.0f;
 
   int n = sizeof(float) * fft_len;
   
+#define UNRL 8
+#pragma unroll 1
+  for( ; i < (di - (UNRL-1)); i += UNRL) 
+    {
+      float a[UNRL];
+      
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]   = *one; one = (float *)((char *)one + n);
+	}
+
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]  += *two; two = (float *)((char *)two + n);
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]  += *three; three = (float *)((char *)three + n); 
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]  += *four; four = (float *)((char *)four + n);
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  *dest = a[j]; dest = (float *)((char *)dest + n); tmax = max(tmax, a[j]);
+	}
+    }
+
 #define UNRL 4
+#pragma unroll 1
+  for( ; i < (di - (UNRL-1)); i += UNRL) 
+    {
+      float a[UNRL];
+      
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]   = *one; one = (float *)((char *)one + n);
+	}
+
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]  += *two; two = (float *)((char *)two + n);
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]  += *three; three = (float *)((char *)three + n); 
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]  += *four; four = (float *)((char *)four + n);
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  *dest = a[j]; dest = (float *)((char *)dest + n); tmax = max(tmax, a[j]);
+	}
+    }
+
+  /*
+#define UNRL 8
+#pragma unroll 1
   for( ; i < (di - (UNRL-1)); i += UNRL) 
     {
       float a[UNRL];
       
       for(int j = 0; j < UNRL; j += 2)
 	{
-	  a[j+0]   = *one + *two; one = (float *)((char *)one + n); two = (float *)((char *)two + n);
-	  a[j+1]   = *one + *two; one = (float *)((char *)one + n); two = (float *)((char *)two + n);
+	  a[j+0]   = *one; one = (float *)((char *)one + n); 
+	  a[j+1]   = *one; one = (float *)((char *)one + n); 
 	  
-	  a[j+0]  += *three + *four; three = (float *)((char *)three + n); four = (float *)((char *)four + n);
-	  a[j+1]  += *three + *four; three = (float *)((char *)three + n); four = (float *)((char *)four + n);
+	  a[j+0]  += *two; two = (float *)((char *)two + n);
+	  a[j+1]  += *two; two = (float *)((char *)two + n);
+	  
+	  a[j+0]  += *three; three = (float *)((char *)three + n); 
+	  a[j+1]  += *three; three = (float *)((char *)three + n);
+	  
+	  a[j+0]  += *four; four = (float *)((char *)four + n);
+	  a[j+1]  += *four; four = (float *)((char *)four + n);
 
 	  *dest = a[j+0]; dest = (float *)((char *)dest + n); tmax = max(tmax, a[j+0]);
 	  *dest = a[j+1]; dest = (float *)((char *)dest + n); tmax2 = max(tmax2, a[j+1]);
 	}
     }
-
+*/
+   
 #pragma unroll 1
   for( ; i < di; i++ ) 
       {
-	float sum  = (*one + *two) + (*three + *four);
-	one = (float *)((char *)one + n);
-	two = (float *)((char *)two + n);
-	three = (float *)((char *)three + n);
-	four = (float *)((char *)four + n);
+	float sum;
+	sum  = *one;   one = (float *)((char *)one + n);
+	sum += *two;   two = (float *)((char *)two + n);
+	sum += *three; three = (float *)((char *)three + n);
+	sum += *four;  four = (float *)((char *)four + n);
 	*dest = sum;
 	tmax = max(tmax, sum);		
 	dest = (float *)((char *)dest + n);
       }
 
-  tmax = max(tmax, tmax2);
-  return tmax;
+  return max(tmax, tmax2);
 
 }
 
 
 template <int fft_len>
-__device__ float cudaAcc_sumtop5(float *tab, float * __restrict__ dest, int di, float *tmp0, float *tmp1, float *tmp2, float *tmp3) 
+__device__ __forceinline__ float cudaAcc_sumtop5(float *tab, float * __restrict__ dest, int di, float *tmp0, float *tmp1, float *tmp2, float *tmp3) 
 {
-  float sum, sum2, tmax;
   int   i = 0;
   float * __restrict__ one = tab;
   float * __restrict__ two = tmp0; //(float *)((char *)tab + tmp0);  // * fft_len * sizeof(float));
   float * __restrict__ three = tmp1; //(float *)((char *)tab + tmp1);// * fft_len * sizeof(float));
   float * __restrict__ four = tmp2; //(float *)((char *)tab + tmp2); // * fft_len * sizeof(float));
   float * __restrict__ five = tmp3; //(float *)((char *)tab + tmp3); // * fft_len * sizeof(float));
-  tmax = 0.0f;
+    float tmax = 0.0f;
 
   int n = sizeof(float) * fft_len;
 
-#define UNRL 2
-  for(; i < (di - (UNRL-1)); i += UNRL) 
-    for(int j = 0; j < UNRL; j++)
-      {
-	sum   = *five;
-	sum2  = (*three + *four);
-	sum  += (*one + *two);
-	one = (float *)((char *)one + n);
-	two = (float *)((char *)two + n);
-	three = (float *)((char *)three + n);
-	four  = (float *)((char *)four + n);
-        sum   = (sum + sum2);
-	five   = (float *)((char *)five + n);
-	*dest  = sum;
-	tmax = max(tmax, sum);		
-	dest = (float *)((char *)dest + n);
-      }
+#define UNRL 8
+#pragma unroll 1
+  for( ; i < (di - (UNRL-1)); i += UNRL) 
+    {
+      float a[UNRL];
+      
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]   = *one; one = (float *)((char *)one + n);
+	}
+
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]  += *two; two = (float *)((char *)two + n);
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]  += *three; three = (float *)((char *)three + n); 
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]  += *four; four = (float *)((char *)four + n);
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]  += *five; five = (float *)((char *)five + n);
+	}
+      
+      for(int j = 0; j < UNRL; j++)
+	{
+	  *dest = a[j]; dest = (float *)((char *)dest + n); tmax = max(tmax, a[j]);
+	}
+    }
+
+#define UNRL 4
+#pragma unroll 1
+  for( ; i < (di - (UNRL-1)); i += UNRL) 
+    {
+      float a[UNRL];
+      
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]   = *one; one = (float *)((char *)one + n);
+	}
+
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]  += *two; two = (float *)((char *)two + n);
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]  += *three; three = (float *)((char *)three + n); 
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]  += *four; four = (float *)((char *)four + n);
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j]  += *five; five = (float *)((char *)five + n);
+	}
+      
+      for(int j = 0; j < UNRL; j++)
+	{
+	  *dest = a[j]; dest = (float *)((char *)dest + n); tmax = max(tmax, a[j]);
+	}
+    }
 
 #pragma unroll 1
   for( ; i < di; i++) 
       {
-	sum = *five;
-	sum2 = (*three + *four);
+	float sum = *five;
+	float sum2 = (*three + *four);
 	sum += (*one + *two);
 	one = (float *)((char *)one + n);
 	two = (float *)((char *)two + n);
@@ -1229,9 +1399,73 @@ __device__ float cudaAcc_sumtop5(float *tab, float * __restrict__ dest, int di, 
 	tmax = max(tmax, sum);		
 	dest = (float *)((char *)dest + n);
       }
+      
   return tmax;
 }
 
+/*
+template <int fft_len>
+__device__ __forceinline__ float cudaAcc_sumtop5(float *tab, float * __restrict__ dest, int di, float *tmp0, float *tmp1, float *tmp2, float *tmp3) 
+{
+  int   i = 0;
+  float * __restrict__ one = tab;
+  float * __restrict__ two = tmp0; //(float *)((char *)tab + tmp0);  // * fft_len * sizeof(float));
+  float * __restrict__ three = tmp1; //(float *)((char *)tab + tmp1);// * fft_len * sizeof(float));
+  float * __restrict__ four = tmp2; //(float *)((char *)tab + tmp2); // * fft_len * sizeof(float));
+  float * __restrict__ five = tmp3; //(float *)((char *)tab + tmp3); // * fft_len * sizeof(float));
+    float tmax = 0.0f, tmax2 = 0.0f;
+
+  int n = sizeof(float) * fft_len;
+
+#define UNRL 4
+#pragma unroll 1
+  for( ; i < (di - (UNRL-1)); i += UNRL) 
+    {
+      float a[UNRL];
+      
+      for(int j = 0; j < UNRL; j += 2)
+	{
+	  a[j+0]   = *one; one = (float *)((char *)one + n); 
+	  a[j+1]   = *one; one = (float *)((char *)one + n); 
+
+	  a[j+0]  += *two; two = (float *)((char *)two + n);
+	  a[j+1]  += *two; two = (float *)((char *)two + n);
+	  
+	  a[j+0]  += *three; three = (float *)((char *)three + n); 
+	  a[j+1]  += *three; three = (float *)((char *)three + n); 
+
+	  a[j+0]  += *four; four = (float *)((char *)four + n);
+	  a[j+1]  += *four; four = (float *)((char *)four + n);
+
+	  a[j+0]  += *five; five = (float *)((char *)five + n);
+	  a[j+1]  += *five; five = (float *)((char *)five + n);
+
+	  *dest = a[j+0]; dest = (float *)((char *)dest + n); tmax = max(tmax, a[j+0]);
+	  *dest = a[j+1]; dest = (float *)((char *)dest + n); tmax2 = max(tmax2, a[j+1]);
+	}
+    }
+
+#pragma unroll 1
+  for( ; i < di; i++) 
+      {
+	float sum = *five;
+	float sum2 = (*three + *four);
+	sum += (*one + *two);
+	one = (float *)((char *)one + n);
+	two = (float *)((char *)two + n);
+	three = (float *)((char *)three + n);
+	four  = (float *)((char *)four + n);
+        sum   = (sum + sum2);
+	five   = (float *)((char *)five + n);
+	*dest  = sum;
+	tmax = max(tmax, sum);		
+	dest = (float *)((char *)dest + n);
+      }
+      
+  return max(tmax, tmax2);
+}
+
+*/
 
 template <int step>
 __device__ void cudaAcc_copy(float * __restrict__ from, float * __restrict__ to, int count) 
@@ -1297,8 +1531,8 @@ __global__ void find_pulse_kernel(float best_pulse_score, int PulsePotLen, int A
     }
 
   int ul_PoT = blockIdx.x * blockDim.x + threadIdx.x;
-
-  if ((ul_PoT < 1) | (ul_PoT >= fft_len)) return; // Original find_pulse, omits first element
+  //	int tid = threadIdx.x+blockIdx.x*blockDim.x+blockIdx.y*blockDim.x*gridDim.x;
+  if ((ul_PoT < 1) || (ul_PoT >= fft_len)) return; // Original find_pulse, omits first element
   int PoTLen = 1024*1024 / fft_len;//cudaAcc_PulseFind_settings.NumDataPoints
   int y = blockIdx.y * blockDim.y;// + threadIdx.y;
   int TOffset1 = y * AdvanceBy;
@@ -1370,7 +1604,8 @@ __global__ void find_pulse_kernel(float best_pulse_score, int PulsePotLen, int A
       }
 
     int olddi = -1;
-
+    
+#pragma unroll 1
     for(int p = lastP ; p > firstP ; p--) 
       {
 	float cur_thresh, dis_thresh;
@@ -1439,7 +1674,7 @@ __global__ void find_pulse_kernel(float best_pulse_score, int PulsePotLen, int A
 		cudaAcc_PulseFind_settings.result_flags_fp->has_best_pulse = 1;					
 	      }
 
-	    if((tmp_max>cur_thresh) & ((t1=tmp_max-cur_thresh)>maxd)) 
+	    if((tmp_max>cur_thresh) && ((t1=tmp_max-cur_thresh)>maxd)) 
 	      {
 		//maxp  = (float)p/(float)perdiv;
 		maxd  = t1;
@@ -1471,7 +1706,8 @@ __global__ void find_pulse_kernel(float best_pulse_score, int PulsePotLen, int A
 	  }
 	
 	int num_adds_2 = num_adds << 1;
-
+	
+#pragma unroll 1
 	for(int j = 1; j < ndivs; j++) 
 	  {
 	    float sqrt_num_adds_2_div_avg = 1.0f/(avg/(float)sqrt((float)num_adds_2));
@@ -1521,7 +1757,7 @@ __global__ void find_pulse_kernel(float best_pulse_score, int PulsePotLen, int A
 		    cudaAcc_PulseFind_settings.result_flags_fp->has_best_pulse = 1;
 		  }
 		
-		if((tmp_max>cur_thresh) & ((t1=tmp_max-cur_thresh)>maxd)) 
+		if((tmp_max>cur_thresh) && ((t1=tmp_max-cur_thresh)>maxd)) 
 		  {
 		    //maxp = (float)p/(float)perdiv;
 		    maxd = t1;
@@ -1850,7 +2086,7 @@ int cudaAcc_initialize_pulse_find(double pulse_display_thresh, double PulseThres
       for (int di= 1; di< (PulseMax/32)+1; di++) 
 	{
 	  cudaAcc_dev_t_funct<<<grid,block>>>((float)PulseThresh, PulseMax, di, dev_t_funct_cache, (float)pulse_display_thresh);
-	  cu_err = CUDASYNC;
+	  cu_err = cudaSuccess; //CUDASYNC;
 	  if (cudaSuccess != cu_err) {
 	    CUDA_ACC_SAFE_CALL_NO_SYNC("cudaAcc_dev_t_funct");
 	    break; // No need to keep going if there's a problem, and we can save the last error status
@@ -1877,7 +2113,7 @@ int cudaAcc_initialize_pulse_find(double pulse_display_thresh, double PulseThres
       free(t_funct_cache);
     }
   
-  CUDA_ACC_SAFE_CALL((CUDASYNC),true);
+  //CUDA_ACC_SAFE_CALL((CUDASYNC),true);
   
   cudaAcc_PulseMax = PulseMax;
   cudaAcc_rcfg_dis_thresh = (float) (1.0 / pulse_display_thresh);
@@ -1973,8 +2209,7 @@ __device__ float cudaAcc_reduce_sum(float* sdata)
 template <unsigned int fft_n, unsigned int n>
 __device__ float cudaAcc_reduce_max(float* sdata) 
 {
-  int tid = threadIdx.x;
-
+  int tid = threadIdx.x;		
   float *sdatap = &sdata[tid];
   
   if(fft_n * n > 32)
@@ -2027,48 +2262,38 @@ __device__ float cudaAcc_reduce_max(float* sdata)
 
 
 template <unsigned int fft_n, unsigned int n>
-__device__ float cudaAcc_sumtop2_2(float *tab, float * __restrict__ dest, int di, float *tmp0) 
+__device__ __forceinline__ float cudaAcc_sumtop2_2(float *tab, float * __restrict__ dest, int di, float *tmp0) 
 {
-  int tid = threadIdx.x;
+  int rounds = (n - 1 + di - (int)(threadIdx.x >> (int)log2((float) fft_n))) / n;
 
-  int rounds = (n - 1 + di - (int)(tid >> (int)log2((float) fft_n))) / n;
-
-  int idx = tid & (-fft_n);
+  int idx = threadIdx.x & (-fft_n);
   float * __restrict__ one = tab + idx;
   float * __restrict__ two = tmp0 + idx; 
   dest += idx;
 
   int i = 0;
-  float tmax = 0.0f, tmax2 = 0.0f;
-
-#define UNRL 16
-  for(; i < (rounds-(UNRL-1)); i += UNRL) 
-    {
-      float a[UNRL];
-      
-      for(int j = 0; j < UNRL; j += 2)
-	{
-	  a[j+0] = *one + *two; one += fft_n*n; two += fft_n*n;
-	  a[j+1] = *one + *two; one += fft_n*n; two += fft_n*n;
-	  *dest = a[j+0]; dest += fft_n*n; tmax = max(tmax, a[j+0]);
-	  *dest = a[j+1]; dest += fft_n*n; tmax2 = max(tmax2, a[j+1]);
-	}
-    }
+  float tmax = 0.0f;
 
 #define UNRL 4
+#pragma unroll 1
   for(; i < (rounds-(UNRL-1)); i += UNRL) 
     {
       float a[UNRL];
       
-      for(int j = 0; j < UNRL; j += 2)
+      for(int j = 0; j < UNRL; j++)
 	{
-	  a[j+0] = *one + *two; one += fft_n*n; two += fft_n*n;
-	  a[j+1] = *one + *two; one += fft_n*n; two += fft_n*n;
-	  *dest = a[j+0]; dest += fft_n*n; tmax = max(tmax, a[j+0]);
-	  *dest = a[j+1]; dest += fft_n*n; tmax2 = max(tmax2, a[j+1]);
+	  a[j] = *one; one += fft_n*n;
+	}
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j] += *two; two += fft_n*n;
+	}
+      for(int j = 0; j < UNRL; j++)
+	{
+	  *dest = a[j]; dest += fft_n*n; tmax = max(tmax, a[j]);
 	}
     }
-
+    
 #pragma unroll 1
   for(; i < rounds; i += 1) 
     {
@@ -2077,89 +2302,101 @@ __device__ float cudaAcc_sumtop2_2(float *tab, float * __restrict__ dest, int di
       tmax = fmaxf(tmax, sum);		
     }
 
-  tmax = max(tmax, tmax2);
   return tmax;
 }
 
 
 
 template <unsigned int fft_n, unsigned int n>
-__device__ float cudaAcc_sumtop3_2(float *tab, float * __restrict__ dest, int ul_PoT, int di, float *tmp0, float *tmp1) 
+__device__ __forceinline__ float cudaAcc_sumtop3_2(float *tab, float * __restrict__ dest, int ul_PoT, int di, float *tmp0, float *tmp1) 
 {
-  int tid = threadIdx.x;
-
-  int idx = tid & (-fft_n);
+//  int idx = (threadIdx.x / fft_n) * fft_n;
+  int idx = threadIdx.x & (-fft_n);
   float * __restrict__ one = tab + idx;
   float * __restrict__ two = tmp0 + idx; 
   float * __restrict__ three = tmp1 + idx; 
   dest += idx;
 
-  int rounds = (n - 1 + di - (int)(tid >> (int)log2((float)fft_n))) / n;
-  float tmax = 0.0f, tmax2 = 0.0f;
+  int rounds = (n - 1 + di - (int)(threadIdx.x >> (int)log2((float)fft_n))) / n;
+  float tmax = 0.0f;
   int i = 0;
 
 #define UNRL 4
-  for(; i < (rounds-(UNRL-1)); i += UNRL) 
+#pragma unroll 1
+  for( ; i < (rounds - (UNRL-1)); i += UNRL) 
     {
       float a[UNRL];
-	  
-      for(int j = 0; j < UNRL; j += 2)
+      for(int j = 0; j < UNRL; j++)
 	{
-	  a[j+0] = *one; one += fft_n*n;
-	  a[j+1] = *one; one += fft_n*n;
-	  a[j+0] += *two + *three; two += fft_n*n; three += fft_n*n;
-	  a[j+1] += *two + *three; two += fft_n*n; three += fft_n*n;
-	  *dest = a[j+0]; dest += fft_n*n; tmax  = max(tmax,  a[j+0]);
-	  *dest = a[j+1]; dest += fft_n*n; tmax2 = max(tmax2, a[j+1]);
+	  a[j] = *one; one = one + fft_n*n;
+	}
+	
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j] += *two; two = two + fft_n*n;
+	}
+	
+      for(int j = 0; j < UNRL; j++)
+	{
+	  a[j] += *three; three = three + fft_n*n;
+	}
+	
+      for(int j = 0; j < UNRL; j++)
+	{
+	  *dest = a[j]; dest = dest + fft_n*n; tmax = max(tmax, a[j]);		
 	}
     }
-  
+
 #pragma unroll 1
-  for(; i < rounds; i += 1) 
-    {
-      float sum  = *one; one += fft_n*n;  
-      sum += *two + *three; two += fft_n*n; three += fft_n*n;
-      *dest = sum; dest += fft_n*n;
-      tmax = fmaxf(tmax, sum);		
-    }
- 
-  tmax = max(tmax, tmax2);
+  for( ; i < rounds; i++ ) 
+      {
+	float sum  = *one; one   = one + fft_n*n;
+	sum += *two;       two   = two + fft_n*n;
+	sum += *three;     three = three + fft_n*n;
+	*dest = sum;
+	tmax = max(tmax, sum);		
+	dest = dest + fft_n*n;
+      }
+
   return tmax;
 }
 
 
 template <unsigned int fft_n, unsigned int n>
-__device__ float cudaAcc_sumtop4_2(float *tab, float * __restrict__  dest, int ul_PoT, int di, float *tmp0, float *tmp1, float *tmp2) 
+__device__ __forceinline__ float cudaAcc_sumtop4_2(float *tab, float * __restrict__  dest, int ul_PoT, int di, float *tmp0, float *tmp1, float *tmp2) 
 {
-  int tid = threadIdx.x;
-
-  int idx = tid & (-fft_n);
+//  int idx = (threadIdx.x / fft_n) * fft_n;
+  int idx = threadIdx.x & (-fft_n);
   float * __restrict__ one = tab + idx;
   float * __restrict__ two = tmp0 + idx;   // (float *)((char *)tab + tmp0);// * fft_n * sizeof(float));
   float * __restrict__ three = tmp1 + idx; //(float *)((char *)tab + tmp1);// * fft_n * sizeof(float));
   float * __restrict__ four = tmp2 + idx;  //(float *)((char *)tab + tmp2);// * fft_n * sizeof(float));
   dest += idx;
 
-  int rounds = (n - 1 + di - (int)(tid >> (int)log2((float)fft_n))) / n;
-  float tmax = 0.0f, tmax2 = 0.0f;
+  int rounds = (n - 1 + di - (int)(threadIdx.x >> (int)log2((float)fft_n))) / n;
+  float tmax = 0.0f;
   int i = 0;
 
 #define UNRL 4
+#pragma unroll 1
   for(; i < (rounds-(UNRL-1)); i += UNRL) 
     {
       float a[UNRL];
 	  
-      for(int j = 0; j < UNRL; j+=2)
-	{
-	  a[j+0] = *one + *two;  one += fft_n*n; two += fft_n*n;
-	  a[j+1] = *one + *two;  one += fft_n*n; two += fft_n*n;
+      for(int j = 0; j < UNRL; j++)
+        { a[j] = *one; one += fft_n*n; }
+      
+      for(int j = 0; j < UNRL; j++)
+	{ a[j] += *two; two += fft_n*n; }
+      
+      for(int j = 0; j < UNRL; j++)
+	{ a[j] += *three; three += fft_n*n; }
+
+      for(int j = 0; j < UNRL; j++)
+	{ a[j] += *four; four += fft_n*n; }
 	  
-	  a[j+0] += *three + *four; three += fft_n*n; four += fft_n*n;
-	  a[j+1] += *three + *four; three += fft_n*n; four += fft_n*n;
-	  
-	  *dest = a[j+0]; dest += fft_n*n; tmax  = max(tmax,  a[j+0]);
-	  *dest = a[j+1]; dest += fft_n*n; tmax2 = max(tmax2, a[j+1]);
-	}
+      for(int j = 0; j < UNRL; j++)
+	{ *dest = a[j]; dest += fft_n*n; tmax  = max(tmax,  a[j]); }
     }
 
 #pragma unroll 1
@@ -2171,17 +2408,15 @@ __device__ float cudaAcc_sumtop4_2(float *tab, float * __restrict__  dest, int u
       tmax = fmaxf(tmax, sum);		
     }
 
-  tmax = max(tmax, tmax2); 
   return tmax;
 }
 
 
 template <unsigned int fft_n, unsigned int n>
-__device__ float cudaAcc_sumtop5_2(float *tab, float * __restrict__ dest, int ul_PoT, int di, float *tmp0, float *tmp1, float *tmp2, float *tmp3) 
+__device__ __forceinline__ float cudaAcc_sumtop5_2(float *tab, float * __restrict__ dest, int ul_PoT, int di, float *tmp0, float *tmp1, float *tmp2, float *tmp3) 
 {
-  int tid = threadIdx.x;
-
-  int idx = tid & (-fft_n);
+//  int idx = (threadIdx.x / fft_n) * fft_n;
+  int idx = threadIdx.x & (-fft_n);
   float * __restrict__ one = tab + idx;
   float * __restrict__ two = tmp0 + idx; //(float *)((char *)tab + tmp0);// * fft_n * sizeof(float));
   float * __restrict__ three = tmp1 + idx; //(float *)((char *)tab + tmp1);// * fft_n * sizeof(float));
@@ -2189,10 +2424,35 @@ __device__ float cudaAcc_sumtop5_2(float *tab, float * __restrict__ dest, int ul
   float * __restrict__ five = tmp3 + idx; //(float *)((char *)tab + tmp3);// * fft_n * sizeof(float));
   dest += idx;
 
-  int rounds = (n - 1 + di - (int)(tid >> (int)log2((float)fft_n))) / n;
-  float tmax = 0.0f, tmax2 = 0.0f;
+  int rounds = (n - 1 + di - (int)(threadIdx.x >> (int)log2((float)fft_n))) / n;
+  float tmax = 0.0f;
   int i = 0;
 
+#define UNRL 2
+#pragma unroll 1
+  for(; i < (rounds - (UNRL-1)); i += UNRL) 
+    {
+      float a[UNRL];
+	  
+      for(int j = 0; j < UNRL; j++)
+        { a[j] = *one; one += fft_n*n; }
+      
+      for(int j = 0; j < UNRL; j++)
+	{ a[j] += *two; two += fft_n*n; }
+      
+      for(int j = 0; j < UNRL; j++)
+	{ a[j] += *three; three += fft_n*n; }
+
+      for(int j = 0; j < UNRL; j++)
+	{ a[j] += *four; four += fft_n*n; }
+      
+      for(int j = 0; j < UNRL; j++)
+	{ a[j] += *five; five += fft_n*n; }
+	  
+      for(int j = 0; j < UNRL; j++)
+	{ *dest = a[j]; dest += fft_n*n; tmax  = max(tmax,  a[j]); }
+    }
+    
 #pragma unroll 1
   for(; i < rounds; i += 1) 
     {
@@ -2203,7 +2463,7 @@ __device__ float cudaAcc_sumtop5_2(float *tab, float * __restrict__ dest, int ul
       tmax = max(tmax, sum);		
     }
 
-  tmax = max(tmax, tmax2);
+
   return tmax;
 }
 
@@ -2211,11 +2471,10 @@ __device__ float cudaAcc_sumtop5_2(float *tab, float * __restrict__ dest, int ul
 template <unsigned int fft_n, unsigned int n>
 __device__ void cudaAcc_copy2(float * __restrict__ from, float * __restrict__ to, int count) 
 {
-  int tid = threadIdx.x;
-
-  int j = tid & (-fft_n);
+//  int j = (threadIdx.x / fft_n) * fft_n;
+  int j = threadIdx.x & (-fft_n);
   float * __restrict__ f = &from[j], * __restrict__ t = &to[j];
-  int rounds = (n - 1 + count - (int)(tid / fft_n)) / n;
+  int rounds = (n - 1 + count - (int)(threadIdx.x / fft_n)) / n;
   int i = 0;
 
 #pragma unroll 1
@@ -2247,15 +2506,13 @@ find_pulse_kernel2m(
       cudaAcc_PulseFind_settings.result_flags_fp->has_best_pulse = 0;
     }
 
-  int PoTLen = 1024*1024 / fft_n;//cudaAcc_PulseFind_settings.NumDataPoints
-
-  int tid = threadIdx.x;
-  int ul_PoT = (tid) & (fft_n-1);
-  int y = blockIdx.y * blockDim.y + y_offset;
-
+  const int PoTLen = 1024*1024 / fft_n;//cudaAcc_PulseFind_settings.NumDataPoints
+  //const int fidx = threadIdx.x/fft_n;
+  const int ul_PoT = threadIdx.x & (fft_n-1);
+  const int y = blockIdx.y * blockDim.y + y_offset;
   int TOffset1 = y * AdvanceBy;
-  int TOffset2 = y * AdvanceBy;
-  int y4 = y << 2;
+  const int TOffset2 = y * AdvanceBy;
+  const int y4 = y << 2;
   float *tfc = cudaAcc_PulseFind_settings.t_funct_cache_fp + (num_adds - CUDA_ACC_FOLDS_START) * 40960;
 
   if(TOffset1 > (PoTLen - PulsePotLen)) 
@@ -2273,7 +2530,7 @@ find_pulse_kernel2m(
   float tmp_max, t1;
   
   __shared__ float sdata[fft_n*numper];
-  float *sdatat = &sdata[tid];
+  float *sdatat = &sdata[threadIdx.x];
   float4 * __restrict__ resp = &cudaAcc_PulseFind_settings.resultsP[AT_XY(ul_PoT, y4, fft_n)];
 
   if(!load_state) 
@@ -2281,7 +2538,7 @@ find_pulse_kernel2m(
       //  Calculate average power
       avg = (mean[ul_PoT + y*fft_n]);
 
-      if(tid < fft_n) 
+      if(threadIdx.x < fft_n) 
         { 
 #define zero 0
 	  resp[0].x = zero;
@@ -2384,7 +2641,7 @@ find_pulse_kernel2m(
 	    {
 	      best_pulse_score = a / b;
 	      cudaAcc_copy2<fft_n, numper>(tmp_pot, best_pot, di); 				          
-	      if (tid < fft_n) 
+	      if (threadIdx.x < fft_n) 
 		{
 		  resp[0] = make_float4(
 												    tmp_max/avg,
@@ -2402,7 +2659,7 @@ find_pulse_kernel2m(
                 }
             }
 
-	  if ((tmp_max>cur_thresh) & ((t1=tmp_max-cur_thresh)>maxd)) 
+	  if ((tmp_max>cur_thresh) && ((t1=tmp_max-cur_thresh)>maxd)) 
 	    {
 	      //maxp  = (float)p/(float)perdiv;
 	      maxd  = t1;
@@ -2412,7 +2669,7 @@ find_pulse_kernel2m(
 	      //fthresh= _thresh;
 	      cudaAcc_copy2<fft_n, numper>(tmp_pot, report_pot, di);
 	      
-	      if(tid < fft_n) 
+	      if(threadIdx.x < fft_n) 
 		{
 		  // It happens very rarely so it's better to store the results right away instead of
 		  // storing them in registers or worse local memory
@@ -2463,7 +2720,7 @@ find_pulse_kernel2m(
 		{
 		  best_pulse_score = a / b;
 		  cudaAcc_copy2<fft_n,numper>(tmp_pot, best_pot, di);
-		  if(tid < fft_n) 
+		  if(threadIdx.x < fft_n) 
 		    {
 		      resp[0] = make_float4(
 													tmp_max/avg,
@@ -2481,7 +2738,7 @@ find_pulse_kernel2m(
                     }
                 }
 	      
-	      if((tmp_max>cur_thresh) & ((t1=tmp_max-cur_thresh)>maxd)) 
+	      if((tmp_max>cur_thresh) && ((t1=tmp_max-cur_thresh)>maxd)) 
 		{
 		  //maxp = (float)p/(float)perdiv;
 		  maxd = t1;
@@ -2493,7 +2750,7 @@ find_pulse_kernel2m(
 		  
 		  // It happens very rarely so it's better to store the results right away instead of
 		  // storing them in registers or worse local memory
-		  if (tid < fft_n) 
+		  if (threadIdx.x < fft_n) 
 		    {
 		      resp[2 * fft_n] = make_float4(
 													tmp_max/avg,
@@ -2607,29 +2864,29 @@ void cudaAcc_choose_best_find_pulse(float best_pulse_score, int PulsePoTLen, int
       switch (FftLength) 
 	{
 	case 8:
-	  cudaAcc_find_pulse_original2m<8, 1024>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
+	  cudaAcc_find_pulse_original2m<8, PFT2>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
 	  break;
 	case 16:
-	  cudaAcc_find_pulse_original2m<16, 1024>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
+	  cudaAcc_find_pulse_original2m<16, PFT2>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
 	  break; 
 	case 32:
-	  cudaAcc_find_pulse_original2m<32, 1024>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
+	  cudaAcc_find_pulse_original2m<32, PFT2>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
 	  break;		
 	case 64:
-	  cudaAcc_find_pulse_original2m<64, 1024>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
+	  cudaAcc_find_pulse_original2m<64, PFT2>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
 	  break;
 	case 128:
-	  cudaAcc_find_pulse_original2m<128, 1024>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
+	  cudaAcc_find_pulse_original2m<128, PFT2>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
 	  break;
 	case 256:
-	  cudaAcc_find_pulse_original2m<256, 1024>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
+	  cudaAcc_find_pulse_original2m<256, PFT2>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
 	  break;
 	case 512:
-	  cudaAcc_find_pulse_original2m<512, 1024>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
-	  break;
+	  //cudaAcc_find_pulse_original2m<512, PFT2>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
+	  //break;
 	case 1024:
-	  cudaAcc_find_pulse_original2m<1024, 1024>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
-	  break;
+	  //cudaAcc_find_pulse_original2m<1024, PFT2>(best_pulse_score, PulsePoTLen, AdvanceBy, offset);	
+	  //break;
 	default:			
 	  cudaAcc_find_pulse_original(best_pulse_score, PulsePoTLen, AdvanceBy, FftLength, offset);
 	}

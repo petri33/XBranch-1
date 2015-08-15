@@ -40,7 +40,7 @@ float3 *PowerSpectrumSumMax;
 extern __shared__ float3 partial[];
 // At least 32elems per sum
 template <int iterations>
-__global__ void cudaAcc_summax32_kernel(float* input, float3* output) 
+__global__ void cudaAcc_summax32_kernel(float *input, float3 *output) 
 {    
   const int tid = threadIdx.x;
   const int y = blockIdx.y * blockDim.y;
@@ -48,12 +48,12 @@ __global__ void cudaAcc_summax32_kernel(float* input, float3* output)
   const int start = y * gridX * iterations;
   const int end = (y + 1) * gridX * iterations;
   
-  float sum = 0.0f;
+  float sum = 0.0f, sum2 = 0.0f;
   float maximum = 0.0f;    
   int pos = 0;
   int i = start + tid;
   float *ip = &input[i];
-  float val = *ip, val2; 
+  float val = *ip, val2, val3, val4; 
   sum = sum + val;
 
   if(tid > 0) 
@@ -66,43 +66,55 @@ __global__ void cudaAcc_summax32_kernel(float* input, float3* output)
   ip = &input[start + tid + gridX];  
   for(i = start + tid + gridX; i < (end-gridX*3); i += gridX) 
     {
-      val = *ip;
-      ip += gridX;  
-      sum = sum + val;
-      if (val > maximum)
-          {pos = i;
-           maximum = val;}
-      val2 = *ip;
+      val  = *ip; ip += gridX;  
+      val2 = *ip; ip += gridX;  
+      val3 = *ip; ip += gridX;  
+      val4 = *ip; ip += gridX;  
+
+      sum  +=  val + val2;
+      sum2 += val3 + val4;
+      
+      if(val > maximum)
+	{
+	  pos = i;
+	  maximum = val;
+	}
       i += gridX;
-      ip += gridX;  
-      sum = sum + val2;
-      if (val2 > maximum)
-          {pos = i;
-           maximum = val2;}
-      val = *ip;
+      
+      if(val2 > maximum)
+	{
+	  pos = i;
+	  maximum = val2;
+	}
       i += gridX;
-      ip += gridX;  
-      sum = sum + val;
-      if (val > maximum)
-          {pos = i;
-           maximum = val;}
-      val2 = *ip;
+      
+      if(val3 > maximum)
+	{
+	  pos = i;
+          maximum = val3;
+	}
       i += gridX;
-      ip += gridX;  
-      sum = sum + val2;
-      if (val2 > maximum)
-          {pos = i;
-           maximum = val2;}
+      
+      if(val4 > maximum)
+	{
+	  pos = i;
+          maximum = val4;
+	}
     }
+  
+  sum += sum2;
+  
   // tail
   for(; i < end; i += gridX) 
     {
       val = *ip;
       ip += gridX;  
       sum = sum + val;
-      if (val > maximum)
-          {pos = i;
-           maximum = val;}
+      if(val > maximum)
+	{
+	  pos = i;
+	  maximum = val;
+	}
     }
   
   float3 *pp = &partial[tid];
@@ -115,8 +127,8 @@ __global__ void cudaAcc_summax32_kernel(float* input, float3* output)
       if(tid < i) 
 	{            
 	  float a = pp[0].x, b = (*(float3 *)(((char *)pp)+padd)).x;
-	  float s = a + b;
 	  float ay = pp[0].y, by = (*(float3 *)(((char *)pp)+padd)).y;
+	  float s = a + b;
 	  bool bb = ay > by;
 	  float az = pp[0].z, bz = (*(float3 *)(((char *)pp)+padd)).z;
 	  padd >>= 1;
@@ -162,8 +174,8 @@ __global__ void cudaAcc_summax_kernel(float* input, float3* output)
       if((tid & n1) < i) 
 	{
 	  float a = partial[tid].x, b = partial[tid+i].x;
-	  float s = a + b;
 	  float ay = partial[tid].y, by = partial[tid+i].y;
+	  float s = a + b;
 	  bool bb = ay > by;
 	  float az = partial[tid].z, bz = partial[tid+i].z;
 	  partial[tid] = make_float3(s, bb ? ay : by, bb ? az : bz); 
@@ -194,7 +206,7 @@ struct SharedMemory
 };
 
 template <unsigned int fftlen> 
-__global__ void cudaAcc_SM( float* PowerSpectrum,float3* devPowerSpectrumSumMax) 
+__global__ void cudaAcc_SM(float *PowerSpectrum, float3 *devPowerSpectrumSumMax) 
 {
   int iblock = blockIdx.x + blockIdx.y * gridDim.x;
   int sidx = (iblock*blockDim.x + threadIdx.x); 
@@ -260,25 +272,22 @@ __global__ void cudaAcc_SM( float* PowerSpectrum,float3* devPowerSpectrumSumMax)
 void cudaAcc_summax(int fftlen, int offset) 
 {
   cudaStreamWaitEvent(fftstream1, powerspectrumDoneEvent, 0);
-  //	int smemSize2 = fftlen*sizeof(float3);
+
   dim3 block2(fftlen, 1, 1);
-  //dim3 grid2((cudaAcc_NumDataPoints + block2.x - 1) / block2.x, 1, 1);
   dim3 grid2 = grid2D((cudaAcc_NumDataPoints + block2.x - 1) / block2.x);
   
   if(fftlen >= 32 && cudaAcc_NumDataPoints/fftlen < 65536)
     {
       int optimal_block_x;
       if(gCudaDevProps.major >= 2)
-	optimal_block_x = max(32, min(pow2((unsigned int) sqrt((float) (fftlen / 32)) * 32), 1024));
+	optimal_block_x = max(32, min(pow2((unsigned int) sqrt((float) (fftlen / 32)) * 32), 512));
       else
 	optimal_block_x = max(32, min(pow2((unsigned int) sqrt((float) (fftlen / 32)) * 32), 512));
-      
       dim3 block(optimal_block_x, 1, 1);;
       dim3 grid(1, cudaAcc_NumDataPoints / fftlen, 1);     
       int iterations = fftlen/block.x;
-      if(iterations > 256)
-        printf("iterations %d\r\n", iterations);
       
+    
       switch(iterations)
       {
         case 1:
