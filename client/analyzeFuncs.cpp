@@ -31,12 +31,9 @@
 
 #define DO_SMOOTH
 
-
 #if defined(__linux__)
-
 #include <cuda_runtime_api.h>
 #include <unistd.h>
-
 #endif
 
 #if defined(__APPLE__) || defined(__linux__) // Duplicate definitions in windows
@@ -336,16 +333,6 @@ int icfft;  // for debug
 #endif
 
 #ifdef USE_CUDA
-#if defined(__linux__)
-#include  <signal.h>
-#include <stdlib.h>
-__cdecl void INThandler(int sig)
-{
-  cudaDeviceReset();
-  exit(0);
-}
-#endif
-
 void initCudaDevice()
 {
   // Check the commandline args before going attempting to use CUDA
@@ -380,14 +367,9 @@ void initCudaDevice()
 	  boinc_temporary_exit(180,"Cuda device initialisation failed");
 	}
     }
-  
-#if defined(__linux__)
-  if(gSetiUseCudaDevice)
-    signal(SIGINT, INThandler);
-#endif
-
 }
 #endif //USE_CUDA
+
 
 
 int seti_analyze (ANALYSIS_STATE& state) 
@@ -406,7 +388,6 @@ int seti_analyze (ANALYSIS_STATE& state)
   
   SAFE_EXIT_CHECK;
 #ifdef USE_CUDA
-  signal(SIGINT, INThandler);
   initCudaDevice();
   //	// Check the commandline args before going attempting to use CUDA
   //	if(!bNoCUDA)
@@ -1075,7 +1056,7 @@ int seti_analyze (ANALYSIS_STATE& state)
 			{
 			  //printf("Chirping %f\r\n", chirprate);
 			  //printf("Chirping\r\n");
-			  cudaAcc_CalcChirpData_sm13(chirprate, 1/swi.subband_sample_rate, ChirpedData); // P: now does pos and neg at the same time
+			  cudaAcc_CalcChirpData_sm13_async(chirprate, 1/swi.subband_sample_rate, ChirpedData, fftstream0); // P: now does pos and neg at the same time
 			  chirpoffset = 0;
 			  prevchirprate = chirprate;
 			}
@@ -1224,12 +1205,6 @@ int seti_analyze (ANALYSIS_STATE& state)
 	      cudaAcc_find_pulses((float) best_pulse->score, PulsePoTLen, AdvanceBy, fftlen, chirpoffset);
 	    }
 
-	  if(!SkipTriplet) 
-	    {
-	      //printf("FindTriplets\r\n");
-	      cudaAcc_find_triplets(PulsePoTLen, (float)PoTInfo.TripletThresh, AdvanceBy, fftlen, chirpoffset);
-	    }
-	  	  
 	  if(state.PoT_freq_bin == -1) 
 	    {
 	      if(gCudaAutocorrelation && (fftlen == ac_fft_len))
@@ -1246,6 +1221,12 @@ int seti_analyze (ANALYSIS_STATE& state)
 	      cudaAcc_GaussfitStart(fftlen, best_gauss->score, noscore, chirpoffset);
 	    } 
 
+	  if(!SkipTriplet) 
+	    {
+	      //printf("FindTriplets\r\n");
+	      cudaAcc_find_triplets(PulsePoTLen, (float)PoTInfo.TripletThresh, AdvanceBy, fftlen, chirpoffset);
+	    }
+	  	  
 	  if(state.PoT_freq_bin == -1) 
 	    {
 	      
