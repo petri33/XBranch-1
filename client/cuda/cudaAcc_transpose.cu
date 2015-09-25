@@ -84,7 +84,7 @@ __global__ void cudaAcc_transpose(float *odata, float *idata)
   if((xIndex < height) && (yIndex < width))
     {
       unsigned int index_out = yIndex * height + xIndex;
-      odata[index_out] = block[threadIdx.x][threadIdx.y];
+      ST_f_cs(&odata[index_out], block[threadIdx.x][threadIdx.y]);
     }
 }
 
@@ -110,7 +110,7 @@ __global__ void cudaAcc_transpose(float *odata, float *idata, int width, int hei
   if((xIndex < height) && (yIndex < width))
     {
       unsigned int index_out = yIndex * height + xIndex;
-      odata[index_out] = block[threadIdx.x][threadIdx.y];
+      ST_f_cs(&odata[index_out], block[threadIdx.x][threadIdx.y]);
     }
 }
 

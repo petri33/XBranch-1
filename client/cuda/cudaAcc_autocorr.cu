@@ -9,12 +9,13 @@
 //#define B 2
 
 
-#define RPI 64
-#define RPIB 8
-#define RPBY 4
+#define RPI 32
+//RPI was 32
+//#define RPIB 8
 
-#define B 8
+//#define B 8
 #define RPS 64
+
 //must be 256 in current implementation
 #define RDP 256
 
@@ -29,46 +30,60 @@ float3 *dev_ac_partials;
 //float ac_TotalSum;
 //float ac_Peak;
 //int ac_PeakBin;
+#define acfshift 17
 
-
+template<int acfftlen>
 __global__ void 
-//__launch_bounds__(RPI, 8)
-ac_RepackInputKernelP(float *PowerSpectrum, float2 *dct_In, int acfftlen) 
+ac_RepackInputKernelP(float *PowerSpectrum, float4 *dct_In) 
 {
-  int sidx = (threadIdx.x + blockIdx.x*RPI + (blockIdx.y*RPI*RPIB)); 
-  int nDestPoints = acfftlen * 4; // (gridDim.y*RPI*RPIB)*4;
-  int didx1 = sidx<<4; 
-  int didx2 = ((nDestPoints-2)<<3)-didx1; 
+  int sidx = (threadIdx.x + blockIdx.x*RPI);
 
-  PowerSpectrum += sidx + blockIdx.z * acfftlen;
-  float4 *dct1 = (float4*)((char *)dct_In + didx1 + blockIdx.z * acfftlen * 32);
-  float4 *dct2 = (float4*)((char *)dct_In + didx2 + blockIdx.z * acfftlen * 32);
-  float4 t = make_float4(0.0f, 0.0f, PowerSpectrum[0], 0.0f);
-      
-  *dct1 = t;
-  *dct2 = t;
+  PowerSpectrum += sidx + (blockIdx.y << acfshift); //* acfftlen;
+  
+  float4 t = make_float4(0.0f, 0.0f, LDG_f_cs(PowerSpectrum, 0), 0.0f);
+
+  float4 *dct = (float4*)dct_In + (blockIdx.y << (acfshift+1)) + sidx;
+  float4 *dct2 = (float4*)dct_In + (blockIdx.y << (acfshift+1)) + (2*acfftlen-1)-sidx;
+
+  ST_f4_cs(dct, t);
+  ST_f4_cs(dct2, t);
 }
 
-
-
+/*
+template<int acfftlen>
 __global__ void 
-//__launch_bounds__(RPS, 8)
-ac_RepackScaleKernelP(float2 *src, float2 *dst, int acfftlen) 
+ac_RepackInputKernelP(float *PowerSpectrum, float4 *dct_In) 
 {
-  int didx = ((threadIdx.x + blockIdx.x*RPS + blockIdx.y*RPS*B));  //packing into float2s
-  int sidx = didx << 1; //((threadIdx.x + blockIdx.x*RPS*B)*2);
+  int sidx = (threadIdx.x + blockIdx.x*RPI);
 
-//printf("bx=%d, by=%d, tx=%d, sidx=%d\r\n", blockIdx.x, blockIdx.y, threadIdx.x, sidx);
-  dst += didx + blockIdx.z * acfftlen;
-  src += sidx + blockIdx.z * acfftlen * 4;
+  PowerSpectrum += sidx + (blockIdx.y << acfshift); //* acfftlen;
+  float4 t = make_float4(0.0f, 0.0f, LDG_f_cs(PowerSpectrum, 0), 0.0f);
 
-  float4 t = ((float4 *)src)[0];
+  float4 *dct = (float4*)dct_In + (blockIdx.y << (acfshift+1)) + sidx;
+  float4 *dct2 = (float4*)dct_In + (blockIdx.y << (acfshift+1)) + (2*acfftlen-1)-sidx;
+
+  ST_f4_cs(dct, t);
+  ST_f4_cs(dct2, t);
+}
+*/
+
+
+template<int acfftlen>
+__global__ void 
+ac_RepackScaleKernelP(float2 *src, float2 *dst) 
+{
+  int didx = ((threadIdx.x + blockIdx.x*RPS));  //packing into float2s
+  int sidx = didx << 1; 
+
+  dst += didx + blockIdx.y * acfftlen;
+  src += sidx + blockIdx.y * acfftlen * 4;
+
+  float4 t = LDG_f4_cs((float4 *)src, 0);
   float2 a = make_float2(t.x, t.z);
 
   a.x *= a.x;
   a.y *= a.y;
-
-  dst[0] = a;
+  ST_f2_cs(&dst[0], a);
 }
 
 
@@ -82,7 +97,7 @@ __global__ void ac_reducePartial(float *ac, float3 *devpartials, int streamIdx)
   int n = RDP>>1;
   
   float3 *acp = (float3 *)acpartial; 
-  float tmp = ac[idx];
+  float tmp = LDG_f_cs(&ac[idx], 0);
   acp[tid].z = idx;
   acp[tid].y = idx >= 1 ? tmp : 0.0f; 
   acp[tid].x = tmp;
@@ -91,22 +106,25 @@ __global__ void ac_reducePartial(float *ac, float3 *devpartials, int streamIdx)
   
   volatile float3 *dp = &acp[tid];
   int fadd = n * 12;
+  
+ float a = dp[0].x, y = dp[0].y, z = dp[0].z;
 #pragma unroll 2
   for(; n > 32; n >>= 1)
     {
       if(tid < n)
 	{
-	  float a =  __fadd_rn(dp[0].x, (*(float3*)(((char *)dp)+fadd)).x);
+	  a = a + (*(float3*)(((char *)dp)+fadd)).x;
 	  // peak power & its bin
 	  float pp = (*(float3*)(((char *)dp)+fadd)).y;
 	  float pb = (*(float3*)(((char *)dp)+fadd)).z;
+
 	  fadd >>= 1;
-	  bool b = pp > dp[0].y;
           dp[0].x = a;
-	  if(b)
+	  
+	  if(pp > y)
 	    {
-	      dp[0].y = pp;
-	      dp[0].z = pb;
+	      dp[0].y = y = pp;
+	      dp[0].z = z = pb;
 	    }
 	}
       __syncthreads();
@@ -117,28 +135,30 @@ __global__ void ac_reducePartial(float *ac, float3 *devpartials, int streamIdx)
     {
       if(tid < n)
 	{
-	  float a =  __fadd_rn(dp[0].x, (*(float3*)(((char *)dp)+fadd)).x);
+	  a = a + (*(float3*)(((char *)dp)+fadd)).x;
 	  // peak power & its bin
 	  float pp = (*(float3*)(((char *)dp)+fadd)).y;
 	  float pb = (*(float3*)(((char *)dp)+fadd)).z;
+
 	  fadd >>= 1;
-	  bool b = pp > dp[0].y;
           dp[0].x = a;
-	  if(b)
+
+	  if(pp > y)
 	    {
-	      dp[0].y = pp;
-	      dp[0].z = pb;
+	      dp[0].y = y = pp;
+	      dp[0].z = z = pb;
 	    }
 	}
     }
 
   if(tid == 0) 
     {        
-      devpartials[bid] = make_float3(dp[0].x, dp[0].y, dp[0].z);
+      devpartials[bid] = make_float3(a, y, z); //make_float3(dp[0].x, dp[0].y, dp[0].z); //
     }
 }
 
-__global__ void ac_reducePartial16(float *ac, float3 *devpartials, int ac_fftlen)
+template<int acfftlen>
+__global__ void ac_reducePartial16(float *ac, float3 *devpartials)
 {
   const int tid = threadIdx.x;
   const int idx = threadIdx.x + blockIdx.x*RDP;
@@ -147,7 +167,7 @@ __global__ void ac_reducePartial16(float *ac, float3 *devpartials, int ac_fftlen
   float3 *acp = (float3 *)acpartial; 
   for(int f = 0; f < 8; f++)
     {
-      float tmp = ac[idx+f*ac_fftlen*2];
+      float tmp = LDG_f_cs(&ac[idx+f*acfftlen*2], 0);
       acp[tid].z = idx;
       acp[tid].y = idx >= 1 ? tmp : 0.0f; 
       acp[tid].x = tmp;
@@ -158,51 +178,59 @@ __global__ void ac_reducePartial16(float *ac, float3 *devpartials, int ac_fftlen
       int n = RDP>>1;
       int fadd = n * 12;
 
+      float a = dp[0].x, y = dp[0].y, z = dp[0].z;
 #pragma unroll 2
       for(;n > 32; n >>= 1)
 	{
 	  if(tid < n)
 	    {
-	      float a =  __fadd_rn(dp[0].x, (*(float3*)(((char *)(dp))+fadd)).x);
+	      a = a + (*(float3*)(((char *)(dp))+fadd)).x;
 	      // peak power & its bin
 	      float pp = (*(float3*)(((char *)(dp))+fadd)).y;
-	      float pb = (*(float3*)(((char *)(dp))+fadd)).z;
-	      bool b = pp > dp[0].y;
-	      dp[0].x = a;
-	      if(b)
+              float pb = (*(float3*)(((char *)(dp))+fadd)).z;
+	      
+	      if(pp > y)
 		{
-		  dp[0].y = pp;
-		  dp[0].z = pb;
+		  y = pp;
+		  z = pb;
 		}
+	      
+	      dp[0].x = a;
+	      dp[0].y = y;
+	      dp[0].z = z;
+
+	      fadd >>= 1;
 	    }
 	  
-	  fadd >>= 1;
 	  __syncthreads();
 	}
-      
+
 #pragma unroll 6
       for(; n > 0; n >>= 1)
 	{
 	  if(tid < n)
 	    {
-	      float a =  __fadd_rn(dp[0].x, (*(float3*)(((char *)(dp))+fadd)).x);
+	      a = a + (*(float3*)(((char *)(dp))+fadd)).x;
 	      // peak power & its bin
 	      float pp = (*(float3*)(((char *)(dp))+fadd)).y;
 	      float pb = (*(float3*)(((char *)(dp))+fadd)).z;
-	      bool b = pp > dp[0].y;
-	      dp[0].x = a;
-	      if(b)
+	      
+	      if(pp > y)
 		{
-		  dp[0].y = pp;
-		  dp[0].z = pb;
+		  y = pp;
+		  z = pb;
 		}
+	      
+	      dp[0].x = a;
+	      dp[0].y = y;
+	      dp[0].z = z;
+
+	      fadd >>= 1;
 	    }
-	  fadd >>= 1;
 	}
       
-      
       if(tid == 0) 
-	devpartials[bid + f*(ac_fftlen/2)/RDP] = make_float3(dp[0].x, dp[0].y, dp[0].z);
+	devpartials[bid + f*(acfftlen/2)/RDP] = make_float3(a, y, z); //dp[0].x, dp[0].y, dp[0].z);
     }
 }
 
@@ -214,49 +242,38 @@ int cudaAcc_FindAutoCorrelations(int ac_fftlen, int offset)
   cudaError_t err = cudaStreamWaitEvent(cudaAutocorrStream, powerspectrumDoneEvent, 0);	
 
   dim3 block(RPI, 1, 1);
-  dim3 grid(RPIB, (ac_fftlen + (block.x*RPIB) - 1) / (block.x*RPIB), 8); 
+  dim3 grid( ((ac_fftlen) + (block.x) - 1) / (block.x), 8, 1); 
+
   dim3 block2(RPS, 1, 1);
-  dim3 grid2(B, ((ac_fftlen>>1)+block2.x*B-1)/(block2.x*B), 8);
+  dim3 grid2(((ac_fftlen>>1)+block2.x-1)/(block2.x), 8, 1);
 
   //Jason: Use 4N-FFT method for Type 2 Discrete Cosine Tranform for now, to match fftw's REDFT10
   // 1 Autocorrelation from global powerspectrum at fft_num*ac_fft_len  (fft_num*ul_NumDataPoints )
   
   //Step 1: Preprocessing - repack relevant powerspectrum into a 4N array with 'real-even symmetry'
-  CUDA_ACC_SAFE_LAUNCH( (ac_RepackInputKernelP<<<grid, block, 0, cudaAutocorrStream>>>(dev_PowerSpectrum + offset, dev_AutoCorrIn, ac_fftlen)),true);
+//  ac_RepackInputKernelP<131072><<<grid, block, 0, cudaAutocorrStream>>>(dev_PowerSpectrum + offset, (float4 *)dev_AutoCorrIn); // repack not needed, it is done in PowerSpectrum for fftlen 131072
 
   //Step 2: Process the 4N-FFT (Complex to Complex, size is 4 * ac_fft_len)
   cufftExecC2C(cudaAutoCorr_plan, dev_AutoCorrIn, dev_AutoCorrOut, CUFFT_FORWARD);
+  //cufftExecR2C(cudaAutoCorr_plan, (cufftReal*)dev_AutoCorrIn, dev_AutoCorrOut);
 
   //Step 3: Postprocess the FFT result (Scale, take powers & normalise), discarding unused data packing into AutoCorr_in first half for VRAM reuse
-  //CUDA_ACC_SAFE_LAUNCH( (
-  ac_RepackScaleKernelP<<<grid2, block2, 0, cudaAutocorrStream>>>( dev_AutoCorrOut, dev_AutoCorrIn, ac_fftlen);
-  //),true);
+  ac_RepackScaleKernelP<131072><<<grid2, block2, 0, cudaAutocorrStream>>>( dev_AutoCorrOut, dev_AutoCorrIn);
+
 
   int len = ac_fftlen/2;
   int blksize = RDP; 
   dim3 block3(blksize, 1, 1);
   dim3 grid3(len/blksize, 1, 1);
 
-  CUDA_ACC_SAFE_LAUNCH( (ac_reducePartial16<<<grid3, block3, 3072, cudaAutocorrStream>>>( (float *)(dev_AutoCorrIn), dev_ac_partials, ac_fftlen)),true); // dynamic shared size is len/RDP*sizeof(float3) -> limit 4608
+  ac_reducePartial16<131072><<<grid3, block3, 3072, cudaAutocorrStream>>>( (float *)(dev_AutoCorrIn), dev_ac_partials); // dynamic shared size is len/RDP*sizeof(float3) -> limit 3072
+  // err=
+  cudaMemcpyAsync(blockSums, dev_ac_partials, 8*(ac_fftlen/2)/RDP*sizeof(float3), cudaMemcpyDeviceToHost, cudaAutocorrStream);
+  //if(cudaSuccess != err) { fprintf(stderr, "Autocorr - memcpyAsync %d", 0); exit(0); }
 
-/*
-  int len = ac_fftlen/2;
-  int blksize = RDP; 
-  dim3 block3(blksize, 1, 1);
-  dim3 grid3(len/blksize, 1, 1);
-
-  for(int fft_num = 0; fft_num < 8; fft_num++)
-    {
-      CUDA_ACC_SAFE_LAUNCH( (ac_reducePartial<<<grid3, block3, 3072, cudaAutocorrStream>>>( (float *)(dev_AutoCorrIn + fft_num * ac_fftlen), dev_ac_partials+fft_num*(ac_fftlen/2)/RDP, fft_num)),true); // dynamic shared size is len/RDP*sizeof(float3) -> limit 4608
-    }
-
-*/
-
-  err = cudaMemcpyAsync(blockSums, dev_ac_partials, 8*(ac_fftlen/2)/RDP*sizeof(float3), cudaMemcpyDeviceToHost, cudaAutocorrStream);
-  if(cudaSuccess != err) { fprintf(stderr, "Autocorr - memcpyAsync %d", 0); exit(0); }
-
-  err = cudaEventRecord(autocorrelationDoneEvent[0], cudaAutocorrStream);
-  if(cudaSuccess != err) { fprintf(stderr, "Autocorr done %d", 0); exit(0); }
+  //err =
+  cudaEventRecord(autocorrelationDoneEvent, cudaAutocorrStream);
+  //if(cudaSuccess != err) { fprintf(stderr, "Autocorr done %d", 0); exit(0); }
 
   return 0;
 }
@@ -277,7 +294,7 @@ int cudaAcc_GetAutoCorrelation(float *AutoCorrelation, int ac_fftlen, int fft_nu
 
   if(fft_num == 0)
     {
-      err = cudaEventSynchronize(autocorrelationDoneEvent[0]); // host (CPU) code waits for the all (specific) GPU task to complete
+      err = cudaEventSynchronize(autocorrelationDoneEvent); // host (CPU) code waits for the all (specific) GPU task to complete
       if(cudaSuccess != err) { fprintf(stderr, "GetAutocorr - sync %d", fft_num); exit(0); }
     }
 

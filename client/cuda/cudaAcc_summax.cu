@@ -44,17 +44,17 @@ __global__ void cudaAcc_summax32_kernel(float *input, float3 *output)
 {    
   const int tid = threadIdx.x;
   const int y = blockIdx.y * blockDim.y;
-  const int gridX = /* gridDim.x * */ blockDim.x;
+  const int gridX = blockDim.x;
   const int start = y * gridX * iterations;
   const int end = (y + 1) * gridX * iterations;
   
-  float sum = 0.0f, sum2 = 0.0f;
+
   float maximum = 0.0f;    
   int pos = 0;
   int i = start + tid;
   float *ip = &input[i];
-  float val = *ip, val2, val3, val4; 
-  sum = sum + val;
+  float val = *ip, val2, val3, val4;
+  float sum = val, sum2 = 0.0f;
 
   if(tid > 0) 
     { // Original max omits first element of every fft
@@ -66,14 +66,13 @@ __global__ void cudaAcc_summax32_kernel(float *input, float3 *output)
   ip = &input[start + tid + gridX];  
   for(i = start + tid + gridX; i < (end-gridX*3); i += gridX) 
     {
-      val  = *ip; ip += gridX;  
-      val2 = *ip; ip += gridX;  
-      val3 = *ip; ip += gridX;  
-      val4 = *ip; ip += gridX;  
+      val  = LDG_f_cs(ip, 0); ip += gridX;  
+      val2 = LDG_f_cs(ip, 0); ip += gridX;  
+      val3 = LDG_f_cs(ip, 0); ip += gridX;  
+      val4 = LDG_f_cs(ip, 0); ip += gridX;  
 
-      sum  +=  val + val2;
+      sum +=  val + val2;
       sum2 += val3 + val4;
-      
       if(val > maximum)
 	{
 	  pos = i;
@@ -102,12 +101,10 @@ __global__ void cudaAcc_summax32_kernel(float *input, float3 *output)
 	}
     }
   
-  sum += sum2;
-  
   // tail
   for(; i < end; i += gridX) 
     {
-      val = *ip;
+      val = LDG_f_cs(ip, 0);
       ip += gridX;  
       sum = sum + val;
       if(val > maximum)
@@ -116,9 +113,10 @@ __global__ void cudaAcc_summax32_kernel(float *input, float3 *output)
 	  maximum = val;
 	}
     }
-  
+
+  float a, ay, az;
   float3 *pp = &partial[tid];
-  *pp = make_float3(sum, maximum, pos - start);
+  *pp = make_float3(a = sum+sum2, ay = maximum, az = pos - start);
   int padd = (gridX>>1)*12;
 
   for(i = gridX >> 1; i > 0; i >>= 1) 
@@ -126,26 +124,27 @@ __global__ void cudaAcc_summax32_kernel(float *input, float3 *output)
       __syncthreads(); 
       if(tid < i) 
 	{            
-	  float a = pp[0].x, b = (*(float3 *)(((char *)pp)+padd)).x;
-	  float ay = pp[0].y, by = (*(float3 *)(((char *)pp)+padd)).y;
-	  float s = a + b;
-	  bool bb = ay > by;
-	  float az = pp[0].z, bz = (*(float3 *)(((char *)pp)+padd)).z;
+	  a = a + (*(float3 *)(((char *)pp)+padd)).x;
+	  float by = (*(float3 *)(((char *)pp)+padd)).y;
+	  float bz = (*(float3 *)(((char *)pp)+padd)).z;
+
+	  if(by > ay)
+	    {
+	      ay = by;
+	      az = bz;
+	    }
+
+	  pp[0].x = a;
+	  pp[0].y = ay;
+	  pp[0].z = az;
+	  
 	  padd >>= 1;
-	  pp[0] = make_float3(s, bb ? ay : by, bb ? az : bz); 
-	  /*
-	    partial[tid] = make_float3(
-	    partial[tid].x + partial[tid + i].x, 
-	    partial[tid].y > partial[tid + i].y ? partial[tid].y : partial[tid + i].y,
-	    partial[tid].y > partial[tid + i].y ? partial[tid].z : partial[tid + i].z            
-	    ); 
-	  */
 	}
     }
-  
+
   if(tid == 0) 
     {        
-      output[blockIdx.y] = pp[0];
+      output[blockIdx.y] = make_float3(a, ay, az);
     }
 }
 
@@ -163,29 +162,38 @@ __global__ void cudaAcc_summax_kernel(float* input, float3* output)
   const int width = blockDim.x / n;
   
   float val = input[start + tid];
-  if ((tid & n1) == 0)
-    partial[tid] = make_float3(val, 0.0f, tid & n1); // Original max omits first element of every fft
-  else
-    partial[tid] = make_float3(val, val, tid & n1);
-  
+
+  partial[tid] = make_float3(val, ((tid & n1) == 0 ? 0.0f : val), tid & n1); // Original max omits first element of every fft
+
+  float a = partial[tid].x;
+  float ay = partial[tid].y;
+  float az = partial[tid].z;
   for(int i = n >> 1; i > 0; i >>= 1)
     {
       __syncthreads(); 
       if((tid & n1) < i) 
 	{
-	  float a = partial[tid].x, b = partial[tid+i].x;
-	  float ay = partial[tid].y, by = partial[tid+i].y;
-	  float s = a + b;
-	  bool bb = ay > by;
-	  float az = partial[tid].z, bz = partial[tid+i].z;
-	  partial[tid] = make_float3(s, bb ? ay : by, bb ? az : bz); 
+	  a = a + partial[tid+i].x;
+	  float by = partial[tid+i].y;
+	  float bz = partial[tid+i].z;
+
+	  if(by > ay)
+	    {
+	      ay = by;
+	      az = bz;
+	    }
+	  
+	  partial[tid].x = a;
+	  partial[tid].y = ay;
+	  partial[tid].z = az;
 	}
     }
   __syncthreads();
   
-  if (tid < width) {
-    output[blockIdx.y * width + tid] = partial[tid * n];
-  }
+  if(tid < width)
+    {
+      output[blockIdx.y * width + tid] = make_float3(a, ay, az); //partial[tid * n];
+    }
 }
 
 //Jason:---------------------------------------------------------------------------
@@ -218,7 +226,7 @@ __global__ void cudaAcc_SM(float *PowerSpectrum, float3 *devPowerSpectrumSumMax)
   sdata[tid].z = tid;
   sdata[tid].y = (tid == 0 ? 0.0f :  mySum);
   __syncthreads();
-  
+
   if (tid < fftlen/2) // last part of reduction is warp synchronous;
     {
       volatile float3* smem = sdata;
@@ -271,7 +279,7 @@ __global__ void cudaAcc_SM(float *PowerSpectrum, float3 *devPowerSpectrumSumMax)
 //							if (si.s.peak_power > (swi.analysis_cfg.spike_thresh))
 void cudaAcc_summax(int fftlen, int offset) 
 {
-  cudaStreamWaitEvent(fftstream1, powerspectrumDoneEvent, 0);
+  cudaStreamWaitEvent(summaxStream, powerspectrumDoneEvent, 0);
 
   dim3 block2(fftlen, 1, 1);
   dim3 grid2 = grid2D((cudaAcc_NumDataPoints + block2.x - 1) / block2.x);
@@ -279,10 +287,10 @@ void cudaAcc_summax(int fftlen, int offset)
   if(fftlen >= 32 && cudaAcc_NumDataPoints/fftlen < 65536)
     {
       int optimal_block_x;
-      if(gCudaDevProps.major >= 2)
-	optimal_block_x = max(32, min(pow2((unsigned int) sqrt((float) (fftlen / 32)) * 32), 512));
-      else
-	optimal_block_x = max(32, min(pow2((unsigned int) sqrt((float) (fftlen / 32)) * 32), 512));
+      //if(gCudaDevProps.major > 2)
+	optimal_block_x = max(32, min(pow2((unsigned int) sqrt((float) (fftlen / 32)) * 32), 1024)); 
+      //else
+	//optimal_block_x = max(32, min(pow2((unsigned int) sqrt((float) (fftlen / 32)) * 32), 512));
       dim3 block(optimal_block_x, 1, 1);;
       dim3 grid(1, cudaAcc_NumDataPoints / fftlen, 1);     
       int iterations = fftlen/block.x;
@@ -291,31 +299,31 @@ void cudaAcc_summax(int fftlen, int offset)
       switch(iterations)
       {
         case 1:
-	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<1><<<grid, block, (block.x * sizeof(float3)),fftstream1>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
+	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<1><<<grid, block, (block.x * sizeof(float3)),summaxStream>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
 	  break;
         case 2:
-	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<2><<<grid, block, (block.x * sizeof(float3)),fftstream1>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
+	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<2><<<grid, block, (block.x * sizeof(float3)),summaxStream>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
 	  break;
         case 4:
-	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<4><<<grid, block, (block.x * sizeof(float3)),fftstream1>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
+	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<4><<<grid, block, (block.x * sizeof(float3)),summaxStream>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
 	  break;
         case 8:
-	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<8><<<grid, block, (block.x * sizeof(float3)),fftstream1>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
+	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<8><<<grid, block, (block.x * sizeof(float3)),summaxStream>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
 	  break;
         case 16:
-	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<16><<<grid, block, (block.x * sizeof(float3)),fftstream1>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
+	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<16><<<grid, block, (block.x * sizeof(float3)),summaxStream>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
 	  break;
         case 32:
-	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<32><<<grid, block, (block.x * sizeof(float3)),fftstream1>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
+	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<32><<<grid, block, (block.x * sizeof(float3)),summaxStream>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
 	  break;
         case 64:
-	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<64><<<grid, block, (block.x * sizeof(float3)),fftstream1>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
+	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<64><<<grid, block, (block.x * sizeof(float3)),summaxStream>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
 	  break;
         case 128:
-	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<128><<<grid, block, (block.x * sizeof(float3)),fftstream1>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
+	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<128><<<grid, block, (block.x * sizeof(float3)),summaxStream>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
 	  break;
         case 256:
-	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<256><<<grid, block, (block.x * sizeof(float3)),fftstream1>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
+	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax32_kernel<256><<<grid, block, (block.x * sizeof(float3)),summaxStream>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
 	  break;
 	default:
 	  fprintf(stderr, "cudaAcc_summax32_kernel template error\r\n");
@@ -332,32 +340,32 @@ void cudaAcc_summax(int fftlen, int offset)
 #if CUDART_VERSION >= 3000
 //	  cudaFuncSetCacheConfig(cudaAcc_summax32_kernel, cudaFuncCachePreferShared); // Set this at init time
 #endif
-	  block.x = 256; 
+	  block.x = 256; //256 //128
 	}
       dim3 grid(1, cudaAcc_NumDataPoints / block.x, 1);
       switch (fftlen) 
 	{
 	case 128:
-	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax_kernel<128><<<grid, block, (block.x * sizeof(float3)),fftstream1>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
+	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax_kernel<128><<<grid, block, (block.x * sizeof(float3)),summaxStream>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
 	  break;
 	case 64:
-	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax_kernel<64><<<grid, block, (block.x * sizeof(float3)),fftstream1>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
+	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax_kernel<64><<<grid, block, (block.x * sizeof(float3)),summaxStream>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
 	  break;
 	case 32:
-	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax_kernel<32><<<grid, block, (block.x * sizeof(float3)),fftstream1>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
+	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax_kernel<32><<<grid, block, (block.x * sizeof(float3)),summaxStream>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
 	  break;
 	case 16:
-	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax_kernel<16><<<grid, block, (block.x * sizeof(float3)),fftstream1>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
+	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax_kernel<16><<<grid, block, (block.x * sizeof(float3)),summaxStream>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
 	  break;
 	case 8:
-	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax_kernel<8><<<grid, block, (block.x * sizeof(float3)),fftstream1>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
+	  CUDA_ACC_SAFE_LAUNCH((cudaAcc_summax_kernel<8><<<grid, block, (block.x * sizeof(float3)),summaxStream>>>(dev_PowerSpectrum + offset, dev_PowerSpectrumSumMax)),true);
 	  break;
 	}
     }
   
   
-  cudaMemcpyAsync(PowerSpectrumSumMax, dev_PowerSpectrumSumMax, (cudaAcc_NumDataPoints / fftlen) * sizeof(*dev_PowerSpectrumSumMax), cudaMemcpyDeviceToHost, fftstream1);    
-  cudaEventRecord(summaxDoneEvent, fftstream1);
+  cudaMemcpyAsync(PowerSpectrumSumMax, dev_PowerSpectrumSumMax, (cudaAcc_NumDataPoints / fftlen) * sizeof(*dev_PowerSpectrumSumMax), cudaMemcpyDeviceToHost, summaxStream);    
+  cudaEventRecord(summaxDoneEvent, summaxStream);
 }
 
 
@@ -369,16 +377,13 @@ void cudaAcc_summax_x(int fftlen) // not used anymore
   if(fftlen >= 32 && cudaAcc_NumDataPoints/fftlen < 65536)
     {
       int optimal_block_x;
-      if(gCudaDevProps.major >= 2)
-	optimal_block_x = max(32, min(pow2((unsigned int) sqrt((float) (fftlen / 32)) * 32), 1024));
-      else
-	optimal_block_x = max(32, min(pow2((unsigned int) sqrt((float) (fftlen / 32)) * 32), 512));
+
+      optimal_block_x = max(32, min(pow2((unsigned int) sqrt((float) (fftlen / 32)) * 32), 1024));
       
       dim3 block(optimal_block_x, 1, 1);;
       dim3 grid(1, cudaAcc_NumDataPoints / fftlen, 1);     
       int iterations = fftlen/block.x;
-      if(iterations > 256)
-        printf("iterations %d\r\n", iterations);
+
       switch(iterations)
       {
         case 1:
@@ -423,7 +428,7 @@ void cudaAcc_summax_x(int fftlen) // not used anymore
 #if CUDART_VERSION >= 3000
 //	  cudaFuncSetCacheConfig(cudaAcc_summax32_kernel, cudaFuncCachePreferShared); // Set this at init time
 #endif
-	  block.x = 256; 
+	  block.x = 256; //64
 	}
       dim3 grid(1, cudaAcc_NumDataPoints / block.x, 1);
       switch (fftlen) 

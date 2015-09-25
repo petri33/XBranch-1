@@ -30,7 +30,7 @@
 #define GFK_BLOCK 32
 #define GFK_B2 4
 //128
-#define GFP_BLOCK 128
+#define GFP_BLOCK 64
 
 
 #include "cudaAcceleration.h"
@@ -88,36 +88,38 @@ __device__ float cudaAcc_GetPeak(float * __restrict__ fp_PoT, int ul_TOffset, in
   
   float * __restrict__ F_weight = cudaAcc_GaussFit_settings.f_weight;
   
-  int i;
-  
-  float f_sum = 0;
-  
   // Find a weighted sum
 //printf("HSL %d,", ul_HalfSumLength);
   float * __restrict__ pp = &fp_PoT[(ul_TOffset - ul_HalfSumLength) * ul_FftLength];
   float * __restrict__ pp2 = &fp_PoT[(ul_TOffset + ul_HalfSumLength) * ul_FftLength];
 
   float f_MeanPower2 = f_MeanPower + f_MeanPower;
-  
-#define UNRL 4
+
+  float f_sum = 0;
+  int i = ul_TOffset - ul_HalfSumLength;
+    
+#define UNRL 8
 #pragma unroll 1
-  for(i = ul_TOffset - ul_HalfSumLength; i < (ul_TOffset-(UNRL-1)); i += UNRL)
+  for(; i < (ul_TOffset-(UNRL-1)); i += UNRL)
     {
-      float a[UNRL];
-      
+      float a[UNRL], b[UNRL];
       for(int j = 0; j < UNRL; j++)
 	{ 
-	  a[j] = __ldg(pp); pp += ul_FftLength;
+	  a[j] = LDG_f_ca(pp, 0); pp += ul_FftLength;
 	}
       
       for(int j = 0; j < UNRL; j++)
 	{ 
-	  a[j] = a[j] + __ldg(pp2); pp2 -= ul_FftLength;
+	  b[j] = LDG_f_ca(pp2, 0); pp2 -= ul_FftLength;
 	}
-      
+
       for(int j = 0; j < UNRL; j++)
 	{ 
-	  float fw = F_weight[ul_TOffset - (i+j)];
+	  a[j] += b[j];
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{ 
 	  a[j] = (a[j] - f_MeanPower2);
 	}
       
@@ -126,21 +128,64 @@ __device__ float cudaAcc_GetPeak(float * __restrict__ fp_PoT, int ul_TOffset, in
 	  float fw = F_weight[ul_TOffset - (i+j)];
 	  a[j] = a[j] * fw;
 	}
-    
-      for(int j = 0; j < (UNRL >> 1); j++)
-	f_sum += a[j] + a[(UNRL >> 1) + j];
-    }
 
+      // UNRL 8
+      a[0] += a[1]; a[2] += a[3]; a[4] += a[5]; a[6] += a[7];
+      a[0] += a[2]; a[4] += a[6];
+      a[0] += a[4];
+      
+      f_sum += a[0];
+  }
+  
+#define UNRL 4
+#pragma unroll 1
+  for(; i < (ul_TOffset-(UNRL-1)); i += UNRL)
+    {
+      float a[UNRL], b[UNRL];
+      for(int j = 0; j < UNRL; j++)
+	{ 
+	  a[j] = LDG_f_ca(pp, 0); pp += ul_FftLength;
+	}
+      
+      for(int j = 0; j < UNRL; j++)
+	{ 
+	  b[j] = LDG_f_ca(pp2, 0); pp2 -= ul_FftLength;
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{ 
+	  a[j] += b[j];
+	}
+
+      for(int j = 0; j < UNRL; j++)
+	{ 
+	  a[j] = (a[j] - f_MeanPower2);
+	}
+      
+      for(int j = 0; j < UNRL; j++)
+	{ 
+	  float fw = F_weight[ul_TOffset - (i+j)];
+	  a[j] = a[j] * fw;
+	}
+
+      // UNRL 4
+      a[0] += a[1]; a[2] += a[3]; 
+      a[0] += a[2]; 
+
+      //      for(int j = 0; j < (UNRL >> 1); j++)
+      //	f_sum += a[j] + a[(UNRL >> 1) + j];
+      f_sum += a[0];
+    }
 #pragma unroll 1
   for(; i < ul_TOffset; i++) 
     {
-      float fw =  F_weight[ul_TOffset - i];
-      f_sum += (__ldg(pp) + __ldg(pp2) - f_MeanPower2) * fw; pp += ul_FftLength; pp2 -= ul_FftLength;
+      float fw = F_weight[ul_TOffset - i];
+      f_sum += (LDG_f_ca(pp, 0) + LDG_f_ca(pp2, 0) - f_MeanPower2) * fw; pp += ul_FftLength; pp2 -= ul_FftLength;
     }
 
   //last
   float fw =  F_weight[0];
-  f_sum += (__ldg(pp) - f_MeanPower) * fw; pp += ul_FftLength;
+  f_sum += (LDG_f_ca(pp, 0) - f_MeanPower) * fw; 
 
   return(f_sum * f_PeakScaleFactor);
 }
@@ -158,7 +203,7 @@ __device__ float cudaAcc_GetChiSq(float * __restrict__ fp_PoT, const int ul_FftL
   // on the fly as we try to fit them to the
   // actual powers at each point along the PoT.
   ul_PowerLen = 64;
-  float f_ChiSq = 0.0f,f_null_hyp=0.0f;
+  float f_ChiSq = 0, f_null_hyp = 0;
   float recip_MeanPower = __frcp_rn(f_MeanPower);	
   float rebin =  1024*1024 / (ul_FftLength * ul_PowerLen); //cudaAcc_GaussFit_settings.nsamples
   float recip_powerlen = 1.0f/64.0f * 0.5f; //__frcp_rn(ul_PowerLen);
@@ -174,24 +219,23 @@ __device__ float cudaAcc_GetChiSq(float * __restrict__ fp_PoT, const int ul_FftL
   //  power = signal^2 +or- 2*signal + 1
 
   float * __restrict__ F_weight = cudaAcc_GaussFit_settings.f_weight;
-  int i = 0;
 
-//#pragma unroll 8
-  for( ;  i < ul_PowerLen; ++i) 
+  for(int i = 0; i < 64; i++)
     {	
-      int a = ul_TOffset - i, b = i - ul_TOffset;
-      int fwi = i < ul_TOffset ? a : b;      
-
-      float f_PredictedPower = f_PeakPower * (F_weight[fwi]);		
+      int fwi = (i < ul_TOffset ? ul_TOffset - i : i - ul_TOffset);
+      
+      float f_PredictedPower = f_PeakPower * F_weight[fwi];		
+//      float PoTval = __ldg(fp_PoT) * recip_MeanPower - 1.0f; fp_PoT += ul_FftLength; // test next without ldg
+      float PoTval = LDG_f_ca(fp_PoT, 0) * recip_MeanPower - 1.0f; fp_PoT += ul_FftLength; // test next without ldg
       float recip_noise = 1.0f/(sqrt(f_PredictedPower) + 0.5f);
-      float PoTval = __ldg(fp_PoT) * recip_MeanPower - 1.0f; fp_PoT += ul_FftLength;
+
       f_ChiSq += (recip_noise*sqrf(PoTval - f_PredictedPower));
-      f_null_hyp+= (recip_noise*sqrf(PoTval));
+      f_null_hyp += (recip_noise*sqrf(PoTval));
     }
-
-  f_null_hyp *= recip_powerlen*rebin;   //  /= (float)ul_PowerLen;
+  
   f_ChiSq *= recip_powerlen*rebin;      //  /= (float)ul_PowerLen;
-
+  f_null_hyp *= recip_powerlen*rebin;   //  /= (float)ul_PowerLen;
+  
   xsq_null = f_null_hyp;
   return f_ChiSq;
 }
@@ -212,8 +256,8 @@ __device__ float cudaAcc_GetTrueMean(float * __restrict__ fp_PoT, int ul_PowerLe
 #pragma unroll 8
   for(i = i_start; i < (i_lim-3); i+=4) 
     {
-      a += __ldg(pp) + __ldg(pp+ul_FftLength); 
-      b += __ldg(pp+2*ul_FftLength) + __ldg(pp+3*ul_FftLength); 
+      a += LDG_f_cs(pp, 0) + LDG_f_cs(pp+ul_FftLength, 0); 
+      b += LDG_f_cs(pp+2*ul_FftLength, 0) + LDG_f_cs(pp+3*ul_FftLength, 0); 
       pp += 4*ul_FftLength;
     }       
   f_ExcludePower = a + b;
@@ -221,7 +265,7 @@ __device__ float cudaAcc_GetTrueMean(float * __restrict__ fp_PoT, int ul_PowerLe
 #pragma unroll 1
   for(; i < i_lim; i++) 
     {
-      f_add += __ldg(pp); pp += ul_FftLength;
+      f_add += LDG_f_cs(pp, 0); pp += ul_FftLength;
     }
   f_ExcludePower += f_add;
   return((f_TotalPower - f_ExcludePower) / (ul_PowerLen - (i_lim - i_start)));
@@ -241,9 +285,9 @@ __device__ float cudaAcc_GetTrueMean2(float* __restrict__ fp_PoTPrefixSum, int u
   i_start = max(ul_TOffset - ul_ExcludeLen -1, -1);
   i_lim = min(ul_TOffset + ul_ExcludeLen, ul_PowerLen - 1);
   
-  f_ExcludePower = __ldg(&fp_PoTPrefixSum[i_lim * ul_FftLength]);
+  f_ExcludePower = LDG_f_ca(&fp_PoTPrefixSum[i_lim * ul_FftLength], 0);
   if(i_start >= 0)
-    f_ExcludePower -= __ldg(&fp_PoTPrefixSum[i_start * ul_FftLength]); 
+    f_ExcludePower -= LDG_f_ca(&fp_PoTPrefixSum[i_start * ul_FftLength], 0); 
   
   return((f_TotalPower - f_ExcludePower) / (ul_PowerLen - (i_lim - i_start)));
 }
@@ -267,9 +311,7 @@ float cudaAcc_GetPeakScaleFactor(float f_sigma)
   float f_sigma_sq = f_sigma*f_sigma;
   float f_sum = 0.0;
 
-printf("GPSF %f %d\r\n", f_sigma, i_s);
-
-float * __restrict__ F_weight = cudaAcc_GaussFit_settings.f_weight;
+//float * __restrict__ F_weight = cudaAcc_GaussFit_settings.f_weight;
 #pragma unroll 3  
   for(i = 1; i <= i_s; i++) 
     {
@@ -278,6 +320,8 @@ float * __restrict__ F_weight = cudaAcc_GaussFit_settings.f_weight;
   
   f_sum = 2.0f * f_sum + 1.0f;
   
+  printf("GPSF %f %d %f\r\n", f_sigma, i_s, f_sum);
+  
   return(1 / f_sum);
 }
 
@@ -285,7 +329,7 @@ float * __restrict__ F_weight = cudaAcc_GaussFit_settings.f_weight;
 
 // only if (ul_NumSpectra > ul_PoTLen)
 template <int ul_FftLength>
-__launch_bounds__(GFP_BLOCK)
+__launch_bounds__(GFP_BLOCK * 8)
 __global__ void GetFixedPoT_kernel(int offset) 
 {
   int ul_PoT = (blockIdx.x * GFP_BLOCK + threadIdx.x);
@@ -309,49 +353,48 @@ __global__ void GetFixedPoT_kernel(int offset)
   // power spectra bins are added together to make one PoT bin.
   
   //	float sum = 0.0f;
-  float partials1 = 0;
-  float partials2 = 0;
-  float partials3 = 0;
-  float partials4 = 0;
+  float4 partials1 = {0, 0, 0, 0};
+  //  float4 partials2 = {0, 0, 0, 0};
   float4 *ppp = &((float4 *)fp_PowerSpectrum)[1048576 / 64 * ul_PoT_i];
 
   int i = 0;
-  
-#pragma unroll 1
+  /* 
+  //#pragma unroll 1
   for(; i < (ul_PoTChunkSize-3); i += 4) 
     {
       float4 p1, p2;
-      p1 = __ldg(ppp); p2 = __ldg(ppp+4*ul_FftLength/4); ppp += ul_FftLength/4; 
-      partials1 += p1.x + p2.x; 
-      partials2 += p1.y + p2.y; 
-      partials3 += p1.z + p2.z; 
-      partials4 += p1.w + p2.w; 
+      p1 = LDE_f4_cs(ppp, 0); 
+      p2 = LDE_f4_cs(ppp+4*ul_FftLength/4, 0); ppp += ul_FftLength/4; 
+      partials1.x += p1.x + p2.x; 
+      partials1.y += p1.y + p2.y; 
+      partials1.z += p1.z + p2.z; 
+      partials1.w += p1.w + p2.w;
       ppp += ul_FftLength/4;
-      p1 = __ldg(ppp); p2 = __ldg(ppp+4*ul_FftLength/4); ppp += ul_FftLength/4; 
-      partials1 += p1.x + p2.x; 
-      partials2 += p1.y + p2.y; 
-      partials3 += p1.z + p2.z; 
-      partials4 += p1.w + p2.w; 
+      p1 = LDE_f4_cs(ppp, 0); 
+      p2 = LDE_f4_cs(ppp+4*ul_FftLength/4, 0); ppp += ul_FftLength/4; 
+      partials2.x += p1.x + p2.x; 
+      partials2.y += p1.y + p2.y; 
+      partials2.z += p1.z + p2.z; 
+      partials2.w += p1.w + p2.w;
       ppp += ul_FftLength/4;
     }
-
-  // tail if needed
-
+*/
   while(i++ < ul_PoTChunkSize)
     {
-      float4 p1, p2;
-      p1 = __ldg(ppp); ppp += ul_FftLength/4; 
-      partials1 += p1.x; 
-      partials2 += p1.y; 
-      partials3 += p1.z; 
-      partials4 += p1.w; 
+      float4 p1;
+      p1 = LDE_f4_cs(ppp, 0); ppp += ul_FftLength/4; 
+      partials1.x += p1.x; 
+      partials1.y += p1.y; 
+      partials1.z += p1.z; 
+      partials1.w += p1.w; 
     }
 
-  fp_PoT[ul_PoT_i*ul_FftLength/4] = make_float4(partials1, partials2, partials3, partials4);
+  //  partials1.x += partials2.x;
+  //  partials1.y += partials2.y;
+  //  partials1.z += partials2.z;
+  //  partials1.w += partials2.w;
+  ST_f4_cs(&fp_PoT[ul_PoT_i*ul_FftLength/4], partials1);
 }
-
-
-
 
 #define D 16
 
@@ -361,7 +404,7 @@ __global__ void GetFixedPoT_kernel(int offset)
 #define NPK_BLOCK 64
 
 template <int ul_FftLength>
-__launch_bounds__(NPK_BLOCK, 4)
+__launch_bounds__(NPK_BLOCK, 8)
 __global__ void NormalizePoT_kernel(void) 
 {
   int ul_PoT = (blockIdx.x * NPK_BLOCK + threadIdx.x)*NPK_B;
@@ -381,7 +424,7 @@ __global__ void NormalizePoT_kernel(void)
 #pragma unroll
       for(int j = 0; j < D; j++)
 	{
-          b[i+j] = a[j] = __ldg(pp); pp += ul_FftLength/NPK_B; //fp_PoT[(i+j) * ul_FftLength/NPK_B];
+          b[i+j] = a[j] = LDG_f2_cs(pp, 0); pp += ul_FftLength/NPK_B; //fp_PoT[(i+j) * ul_FftLength/NPK_B];
 	}
   
 #pragma unroll
@@ -453,7 +496,7 @@ __global__ void NormalizePoT_kernel(void)
 #define NPK_BLOCK 64
 
 template <int ul_FftLength>
-__launch_bounds__(NPK_BLOCK, 4)
+__launch_bounds__(NPK_BLOCK, 8)
 __global__ void NormalizePoT_kernel(void) 
 {
   int ul_PoT = blockIdx.x * NPK_BLOCK + threadIdx.x;
@@ -472,7 +515,7 @@ __global__ void NormalizePoT_kernel(void)
 #pragma unroll
       for(int j = 0; j < D; j++)
         {
-	  b[i+j] = a[j] = __ldg(pp); pp += ul_FftLength;
+	  b[i+j] = a[j] = LDE_f_cs(pp, 0); pp += ul_FftLength;
 	}
   
 #pragma unroll
@@ -507,18 +550,18 @@ __global__ void NormalizePoT_kernel(void)
       float PoT2 = b[i+1] * fr_MeanPower;
       sum  += PoT;
       f_NormMaxPower  = max(f_NormMaxPower, PoT);
-      *pp = PoT; pp +=  ul_FftLength;
+      ST_f_cs(pp, PoT); pp +=  ul_FftLength; //wb
       sum2 += (PoT + PoT2);
       f_NormMaxPower2 = max(f_NormMaxPower2, PoT2);
-      *pp = PoT2; pp +=  ul_FftLength;
-      fp_PoTPrefixSum[i * ul_FftLength] = sum;
-      fp_PoTPrefixSum[(i+1) * ul_FftLength] = sum2;
+      ST_f_cs(pp, PoT2); pp +=  ul_FftLength; 
+      ST_f_cs(&fp_PoTPrefixSum[i * ul_FftLength], sum);  
+      ST_f_cs(&fp_PoTPrefixSum[(i+1) * ul_FftLength], sum2);  
       sum = sum2;
     }
 
   f_NormMaxPower = max(f_NormMaxPower, f_NormMaxPower2);
 
-  cudaAcc_GaussFit_settings.dev_NormMaxPower[ul_PoT] = f_NormMaxPower;
+  ST_f_cs(&cudaAcc_GaussFit_settings.dev_NormMaxPower[ul_PoT], f_NormMaxPower); 
 }
 #endif
 
@@ -536,7 +579,8 @@ __device__ float cudaAcc_gammln(float a) {
   tmp -= (x+0.5f)*log(tmp);
   ser=1.000000000190015f;
   for (int j=0;j<=5;j++) ser += cof[j]/++y;
-  return (float)(-tmp+log(2.5066282746310005f*ser/x));
+  float ret = (float)(-tmp+log(2.5066282746310005f*ser/x));
+  return ret;
 }
 
 __device__ float cudaAcc_lcgf(float a, float x) {
@@ -593,8 +637,12 @@ __device__ float cudaAcc_calc_GaussFit_score_cached(float chisqr, float null_chi
     ; // using textures linear filtering (interpolation)
 }
 
+
+
+
+
 template <int ul_FftLength>
-__launch_bounds__(GFK_B2*GFK_BLOCK,8)
+__launch_bounds__(GFK_B2*GFK_BLOCK, 4)
 __global__ void GaussFit_kernel(float best_gauss_score, result_flag* flags, bool noscore) 
 {
   if(blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.y == 0 && threadIdx.x == 0) // reset flags
@@ -633,9 +681,10 @@ __global__ void GaussFit_kernel(float best_gauss_score, result_flag* flags, bool
   f_PeakPower = cudaAcc_GetPeak<ul_FftLength>(fp_PoT, ul_TOffset, iSigma, f_TrueMean, cudaAcc_GaussFit_settings.PeakScaleFactor);
   
   // worth looking at ?
-  if(f_PeakPower*rm < cudaAcc_GaussFit_settings.GaussPeakPowerThresh3) 
+  if(isnan(f_PeakPower) || (f_PeakPower*rm < cudaAcc_GaussFit_settings.GaussPeakPowerThresh3)) 
     {
-      *resp = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+      //*resp = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+      ST_4f_cs(resp, 0.0f, 0.0f, 0.0f, 0.0f);
       return;
     } 
   
@@ -650,33 +699,35 @@ __global__ void GaussFit_kernel(float best_gauss_score, result_flag* flags, bool
 			     f_null_hyp
 			     );
   
-  float fmul = 0; // noresults
+  bool results = false;
   if(((f_ChiSq <=  cudaAcc_GaussFit_settings.GaussChiSqThresh) && (f_null_hyp >= cudaAcc_GaussFit_settings.gauss_null_chi_sq_thresh)))
 	{
 	  flags->has_results = 1;
-	  fmul = 1;
+	  results = true;
 	} 
   else
-  if(noscore)
+    /*  if(noscore)
     {
       if(((f_ChiSq <=  cudaAcc_GaussFit_settings.GaussChiSqThresh) && (f_null_hyp >= cudaAcc_GaussFit_settings.gauss_null_chi_sq_thresh)) ) 
 	{
 	  flags->has_results = 1;
-	  fmul = 1;
+	  results = true;
 	} 
     } 
-  else 
+    else*/
+  if(noscore == false) 
     {
       //float score = cudaAcc_calc_GaussFit_score_cached(f_ChiSq, f_null_hyp);
       if (((f_ChiSq <=  cudaAcc_GaussFit_settings.gauss_chi_sq_thresh) && (cudaAcc_calc_GaussFit_score_cached(f_ChiSq, f_null_hyp) > best_gauss_score)) 
          ) 
 	{
 	  flags->has_results = 1;
-          fmul = 1;
+	  results = true;
 	} 
     }
 
-   *resp = make_float4(fmul * f_TrueMean, fmul * f_PeakPower, fmul * f_ChiSq, fmul * f_null_hyp);
+   //*resp = make_float4(fmul * f_TrueMean, fmul * f_PeakPower, fmul * f_ChiSq, fmul * f_null_hyp);
+   ST_f4_cs(resp, make_float4((results ? f_TrueMean : 0), (results ? f_PeakPower : 0), (results ? f_ChiSq : 0), (results ? f_null_hyp : 0) ));
 
 } // End of gaussfit()
 
@@ -803,7 +854,7 @@ int cudaAcc_GaussfitStart(int ul_FftLength, double best_gauss_score, bool noscor
   
   if(ul_NumSpectra == settings.gauss_pot_length) 
     {
-      CUDA_ACC_SAFE_LAUNCH( (cudaMemcpyAsync(dev_PoTG, dev_PowerSpectrum + offset, cudaAcc_NumDataPoints * sizeof(*dev_PowerSpectrum), cudaMemcpyDeviceToDevice, gaussStream)),true);        
+      cudaMemcpyAsync(dev_PoTG, dev_PowerSpectrum + offset, 1024*1024*sizeof(*dev_PowerSpectrum), cudaMemcpyDeviceToDevice, gaussStream);
     } 
   else if (ul_NumSpectra > settings.gauss_pot_length) 
     {
@@ -846,18 +897,6 @@ int cudaAcc_GaussfitStart(int ul_FftLength, double best_gauss_score, bool noscor
 	  break;
 	case 16384:
 	  GetFixedPoT_kernel<16384><<<gridPOT, blockPOT, 0, gaussStream>>>(offset);
-	  break;
-	case 32768:
-	  GetFixedPoT_kernel<32768><<<gridPOT, blockPOT, 0, gaussStream>>>(offset);
-	  break;
-	case 65536:
-	  GetFixedPoT_kernel<65536><<<gridPOT, blockPOT, 0, gaussStream>>>(offset);
-	  break;
-	case 131072:
-	  GetFixedPoT_kernel<131072><<<gridPOT, blockPOT, 0, gaussStream>>>(offset);
-	  break;
-	case 262144:
-	  GetFixedPoT_kernel<262144><<<gridPOT, blockPOT, 0, gaussStream>>>(offset);
 	  break;
 	}
     } 
@@ -903,18 +942,6 @@ int cudaAcc_GaussfitStart(int ul_FftLength, double best_gauss_score, bool noscor
       break;
     case 16384:
       NormalizePoT_kernel<16384><<<grid, block, 0, gaussStream>>>();
-      break;
-    case 32768:
-      NormalizePoT_kernel<32768><<<grid, block, 0, gaussStream>>>();
-      break;
-    case 65536:
-      NormalizePoT_kernel<65536><<<grid, block, 0, gaussStream>>>();
-      break;
-    case 131072:
-      NormalizePoT_kernel<131072><<<grid, block, 0, gaussStream>>>();
-      break;
-    case 262144:
-      NormalizePoT_kernel<262144><<<grid, block, 0, gaussStream>>>();
       break;
     }
 
@@ -962,22 +989,10 @@ int cudaAcc_GaussfitStart(int ul_FftLength, double best_gauss_score, bool noscor
   case 16384:
     GaussFit_kernel<16384><<<grid2, block2, 0, gaussStream>>>((float) best_gauss_score, dev_flagG, noscore);
     break;
-  case 32768:
-    GaussFit_kernel<32768><<<grid2, block2, 0, gaussStream>>>((float) best_gauss_score, dev_flagG, noscore);
-    break;
-  case 65536:
-    GaussFit_kernel<65536><<<grid2, block2, 0, gaussStream>>>((float) best_gauss_score, dev_flagG, noscore);
-    break;
-  case 131072:
-    GaussFit_kernel<131072><<<grid2, block2, 0, gaussStream>>>((float) best_gauss_score, dev_flagG, noscore);
-    break;
-  case 262144:
-    GaussFit_kernel<262144><<<grid2, block2, 0, gaussStream>>>((float) best_gauss_score, dev_flagG, noscore);
-    break;
   }
   
   Gflags->has_results = 0;
-  CUDA_ACC_SAFE_LAUNCH( (cudaMemcpyAsync(Gflags, dev_flagG, sizeof(*dev_flagG), cudaMemcpyDeviceToHost, gaussStream)),true);
+ cudaMemcpyAsync(Gflags, dev_flagG, sizeof(*dev_flagG), cudaMemcpyDeviceToHost, gaussStream);
 
   cudaEventRecord(gaussDoneEvent, gaussStream);
 
@@ -988,63 +1003,44 @@ int cudaAcc_GaussfitStart(int ul_FftLength, double best_gauss_score, bool noscor
 int cudaAcc_fetchGaussfitFlags(int ul_FftLength, double best_gauss_score) 
 {
   cudaEventSynchronize(gaussDoneEvent); // fetch and wait
-  
+
   if(Gflags->has_results > 0) 
     {
       // Download all the results
-      cudaMemcpyAsync(GaussFitResults,
+      int numpoints = (settings.GaussTOffsetStop - settings.GaussTOffsetStart+1)*ul_FftLength;
+//      printf("%d ", numpoints * sizeof(*dev_GaussFitResults)); // <16M
+      cudaMemcpyAsync(GaussFitResults+settings.GaussTOffsetStart*ul_FftLength+1,
+				      dev_GaussFitResults + settings.GaussTOffsetStart*ul_FftLength+1, 
+				      numpoints * sizeof(*dev_GaussFitResults),
+					     cudaMemcpyDeviceToHost, gaussStream);
+
+/*					           cudaMemcpyAsync(GaussFitResults,
 				      dev_GaussFitResults, 
 				      cudaAcc_NumDataPoints * sizeof(*dev_GaussFitResults),
 					     cudaMemcpyDeviceToHost, gaussStream);
 
-      cudaMemcpyAsync(tmp_PoTG, dev_NormMaxPower, ul_FftLength * sizeof(*dev_NormMaxPower), cudaMemcpyDeviceToHost, gaussStream);
-
-      // Preparing data for cudaAcc_getPoT
-      cudaAcc_transposeGPU(dev_t_PowerSpectrumG, dev_PoTG, ul_FftLength, settings.gauss_pot_length, gaussStream);
-
-      cudaMemcpyAsync(best_PoTG, dev_t_PowerSpectrumG, cudaAcc_NumDataPoints * sizeof(*dev_t_PowerSpectrumG), cudaMemcpyDeviceToHost, gaussStream);
-    }
-  
-  cudaEventRecord(gaussDoneEvent, gaussStream);
-  // TODO: Download a little bit less data
-  return Gflags->has_results;
-}
-
-/*
-int cudaAcc_fetchGaussfitFlags(int ul_FftLength, double best_gauss_score) 
-{
-  cudaEventSynchronize(gaussDoneEvent); // fetch and wait
-  
-  if(Gflags->has_results > 0) 
-    {
-      // Download all the results
-      int index = settings.GaussTOffsetStart * ul_FftLength + 1;
-      cudaMemcpyAsync(GaussFitResults + index,
-				      dev_GaussFitResults + index, 
-				      (ul_FftLength-1) * (settings.GaussTOffsetStop - settings.GaussTOffsetStart) * sizeof(*dev_GaussFitResults),
-					     cudaMemcpyDeviceToHost, gaussStream);
-
-      cudaMemcpyAsync(tmp_PoTG, dev_NormMaxPower, ul_FftLength * sizeof(*dev_NormMaxPower), cudaMemcpyDeviceToHost, gaussStream);
-
-      
-      // Preparing data for cudaAcc_getPoT
-      cudaAcc_transposeGPU(dev_t_PowerSpectrumG, dev_PoTG, ul_FftLength, settings.gauss_pot_length, gaussStream);
-
-      cudaMemcpyAsync(best_PoTG, dev_t_PowerSpectrumG, cudaAcc_NumDataPoints * sizeof(*dev_t_PowerSpectrumG), cudaMemcpyDeviceToHost, gaussStream); 
-    }
-  
-  cudaEventRecord(gaussDoneEvent, gaussStream);
-  // TODO: Download a little bit less data
-  return Gflags->has_results;
-}
-
 */
+
+      cudaMemcpyAsync(tmp_PoTG, dev_NormMaxPower, ul_FftLength * sizeof(*dev_NormMaxPower), cudaMemcpyDeviceToHost, gaussStream);
+
+      // Preparing data for cudaAcc_getPoT
+      cudaAcc_transposeGPU(dev_t_PowerSpectrumG, dev_PoTG, ul_FftLength, settings.gauss_pot_length, gaussStream);
+
+      cudaMemcpyAsync(best_PoTG, dev_t_PowerSpectrumG, 64 * ul_FftLength * sizeof(*dev_t_PowerSpectrumG), cudaMemcpyDeviceToHost, gaussStream);
+    }
+  
+  cudaEventRecord(gaussDoneEvent2, gaussStream);
+  // TODO: Download a little bit less data
+  return Gflags->has_results;
+}
+
 
 int cudaAcc_processGaussFit(int ul_FftLength, double best_gauss_score)
 {
   //CUDA_ACC_SAFE_CALL((CUDASYNC), true); // fetch and wait.
 
-  cudaEventSynchronize(gaussDoneEvent);
+  cudaEventSynchronize(gaussDoneEvent2);
+//  GaussFitResults = dev_GaussFitResults;
   
   int result_count = 0;
   for(int TOffset = settings.GaussTOffsetStart; TOffset < settings.GaussTOffsetStop; TOffset++) 

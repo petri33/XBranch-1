@@ -4,7 +4,8 @@
 #include "cudaAcc_data.h"
 #include "cudaAcc_utilities.h"
 
-cufftHandle fft_analysis_plans[MAX_NUM_FFTS][2];
+cufftHandle fft_analysis_plans[MAX_NUM_FFTS][2] =
+{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 int cufft_init[MAX_NUM_FFTS];
 int cufft_len[MAX_NUM_FFTS];
 
@@ -30,6 +31,7 @@ int cudaAcc_fftwf_plan_dft_1d(int FftNum, int FftLen, int NumDataPoints)
   cufft_len[FftNum] = FftLen;
   
   nbofffts = max(nbofffts, FftNum);
+  //printf("%d\r\n", nbofffts);
   return 0;
 }
 
@@ -37,7 +39,10 @@ int cudaAcc_fftwf_plan_dft_1d(int FftNum, int FftLen, int NumDataPoints)
 
 void cudaAcc_execute_dfts(int FftNum, int offset) 
 {
-  CUFFT_SAFE_CALL((cufftExecC2C(fft_analysis_plans[FftNum][0], dev_cx_ChirpDataArray + offset, dev_WorkData + FftNum * 2 * 1179648 + offset, CUFFT_INVERSE)));
+
+  //CUFFT_SAFE_CALL((cufftExecC2C(fft_analysis_plans[FftNum][0], dev_cx_ChirpDataArray + offset, dev_WorkData + FftNum * 2 * PADDED_DATA_SIZE + offset, CUFFT_INVERSE)));
+
+  cufftExecC2C(fft_analysis_plans[FftNum][0], dev_cx_ChirpDataArray + offset, dev_WorkData + FftNum * 2 * PADDED_DATA_SIZE + offset, CUFFT_INVERSE);
   cudaEventRecord(fftDoneEvent, fftstream0);
 }
 
@@ -48,7 +53,7 @@ void cudaAcc_fft_free()
     {
       if(fft_analysis_plans[i][0]) 
 	{
-	  CUFFT_SAFE_CALL(cufftDestroy(fft_analysis_plans[i][0]));
+	  cufftDestroy(fft_analysis_plans[i][0]);
 	  fft_analysis_plans[i][0] = 0; //Make sure it's gone
 	}
       cufft_init[i] = 0;

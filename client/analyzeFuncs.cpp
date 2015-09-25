@@ -542,7 +542,8 @@ int seti_analyze (ANALYSIS_STATE& state)
 #endif
   
   // Allocate data array and work area arrays.
-  
+
+#ifdef FORGET  
   ChirpedData = state.data;
   PowerSpectrum = (float*) calloc_a(NumDataPoints, sizeof(float), MEM_ALIGN);
   if (PowerSpectrum == NULL) SETIERROR(MALLOC_FAILED, "PowerSpectrum == NULL");
@@ -556,11 +557,12 @@ int seti_analyze (ANALYSIS_STATE& state)
     {
       tPowerSpectrum=PowerSpectrum;
     }
-
+#endif
+  
 #ifdef USE_CUDA
   for(int i = 0; i < 8; i++)
     {
-      autoCorrelation[i] = (float*)calloc_a(ac_fft_len, sizeof(float)+1024, MEM_ALIGN);
+      autoCorrelation[i] = (float*)calloc_a(ac_fft_len, sizeof(float), MEM_ALIGN);
       if (autoCorrelation[i] == NULL) SETIERROR(MALLOC_FAILED, "AutoCorrelation == NULL");
     }
 #else
@@ -709,7 +711,7 @@ int seti_analyze (ANALYSIS_STATE& state)
     //		fprintf(stderr," )       _   _  _)_ o  _  _ \n");
     //		fprintf(stderr,"(__ (_( ) ) (_( (_  ( (_ (  \n");
     //		fprintf(stderr," not bad for a human...  _) \n\n");
-    fprintf(stderr,"setiathome enhanced x41zc, Cuda %c.%c%c %s\n\n",custr[0],custr[2],custr[3],(CUDART_VERSION >= 6050) ? "special":"");
+    fprintf(stderr,"setiathome enhanced x41zc, Cuda %c.%c%c %s\n\n",custr[0],custr[2],custr[3],(CUDART_VERSION >= 6050) ? "special\nCompiled with NVCC 7.5, using 6.5 libraries. Modifications done by petri33.\n\n":"");
     if (ac_fft_len) fprintf(stderr,"Detected setiathome_enhanced_v7 task. Autocorrelations enabled, size %dk elements.\n",(int)(ac_fft_len/1024));
     else fprintf(stderr,"Legacy setiathome_enhanced V6 mode.\n");
     fprintf(stderr,"Work Unit Info:\n");
@@ -998,18 +1000,18 @@ int seti_analyze (ANALYSIS_STATE& state)
 		  //fprintf(stderr,"before async chirp\n");
 		  int FNum=0;
 		  int FLen=1;
-		  cudaStream_t chirpstream;
-		  cudaStreamCreate(&chirpstream);
+		  //cudaStream_t chirpstream; // USES now fftstream1 to avoid stream deletion (slow)
+		  //cudaStreamCreate(&chirpstream);
 		  if(gCudaDevProps.major >= 2 || gCudaDevProps.minor >= 3)
 		    {
 		      //printf("Chirping\r\n");
-		      cudaAcc_CalcChirpData_sm13_async(chirprate, 1/swi.subband_sample_rate, ChirpedData, chirpstream);
+		      cudaAcc_CalcChirpData_sm13_async(chirprate, 1/swi.subband_sample_rate, ChirpedData, fftstream1);
 		      prevchirprate = chirprate;
 		    }
 		  else
 		    {
 		      //printf("Chirping\r\n");
-		      cudaAcc_CalcChirpData_async(chirprate, 1/swi.subband_sample_rate, ChirpedData, chirpstream); //change to async version
+		      cudaAcc_CalcChirpData_async(chirprate, 1/swi.subband_sample_rate, ChirpedData, fftstream1); //change to async version
 		    }
 
 		  bitfield = swi.analysis_cfg.analysis_fft_lengths; // reset planning
@@ -1043,7 +1045,7 @@ int seti_analyze (ANALYSIS_STATE& state)
 		  cufftplans_done++;
 		  //CUDA_ACC_SAFE_CALL((CUDASYNC), true); // Wait for first chirp to finish now that cufft plans are done
 		  analysis_state.FLOP_counter+=12.0*NumDataPoints;
-		  cudaStreamDestroy(chirpstream); //finished with the async chirp
+		  //cudaStreamDestroy(chirpstream); //finished with the async chirp
 		  //fprintf(stderr,"after async chirp\n");
 		} 
 	      else 
@@ -1054,7 +1056,7 @@ int seti_analyze (ANALYSIS_STATE& state)
 		      //printf("%f %f %d\r\n", prevchirprate, chirprate, NumDataPoints);
 		      if(chirprate + prevchirprate != 0.0f)
 			{
-			  //printf("Chirping %f\r\n", chirprate);
+			  // //printf("Chirping %f\r\n", chirprate);
 			  //printf("Chirping\r\n");
 			  cudaAcc_CalcChirpData_sm13_async(chirprate, 1/swi.subband_sample_rate, ChirpedData, fftstream0); // P: now does pos and neg at the same time
 			  chirpoffset = 0;
@@ -1064,7 +1066,7 @@ int seti_analyze (ANALYSIS_STATE& state)
 			{
 			  //printf("Skipping %f\r\n", chirprate);
 			  //printf("Using negative chirp from memory\r\n");
-			  chirpoffset = 1179648;
+			  chirpoffset = PADDED_DATA_SIZE;
 			}
 		    }
 		  else
@@ -1076,6 +1078,8 @@ int seti_analyze (ANALYSIS_STATE& state)
 	  else
 	    {
 #endif //USE_CUDA
+
+#ifdef FORGET	      
 	      retval = ChirpData(
 				 DataIn,
 				 ChirpedData,
@@ -1085,6 +1089,8 @@ int seti_analyze (ANALYSIS_STATE& state)
 				 swi.subband_sample_rate
 				 );
 	      if (retval) SETIERROR(retval, "from ChirpData()");
+#endif
+	      
 #ifdef USE_CUDA
 	    }
 #endif //USE_CUDA
@@ -1154,27 +1160,38 @@ int seti_analyze (ANALYSIS_STATE& state)
 
 	  bool SkipTriplet = false, SkipPulse = false;
 	  bool SkipGauss = !(ChirpFftPairs[icfft].GaussFit);
+
 	  if(PulsePoTLen > PoTInfo.TripletMax || PulsePoTLen < PoTInfo.TripletMin)
 	    SkipTriplet = true;
 	  SkipPulse = !(ChirpFftPairs[icfft].PulseFind);
 
+	  int AdvanceBy  = PulsePoTLen - Overlap;     // in bins		   
+	  
 	  if(chirpoffset == 0)
 	    {
-	      //printf("Doing dfts %d\r\n", FftNum);
+	      // //printf("Doing dfts %d %d\r\n", FftNum, 0);
 	      cudaAcc_execute_dfts(FftNum, 0);
-	      cudaAcc_GetPowerSpectrum(NumDataPoints, FftNum, chirpoffset, fftstream0);
-	      cudaAcc_execute_dfts(FftNum, 1179648);
+	      // //printf("Calling getPowerSpectrum (1) %d %d\r\n", FftNum, chirpoffset);
+	      cudaAcc_GetPowerSpectrum(NumDataPoints, FftNum, chirpoffset, fftstream0, (float*)dev_AutoCorrIn, state.PoT_freq_bin == -1 ? fftlen : 0);
+	      if(!SkipTriplet || !SkipPulse) // do beforehand on fftstream0
+		{
+		  cudaAcc_calculate_mean(PulsePoTLen, 0, AdvanceBy, fftlen, chirpoffset);
+		}
 	    }
 	  else
 	    {
 	      //printf("Skipping dfts %d (already done)\r\n", FftNum);
-	      cudaAcc_GetPowerSpectrum(NumDataPoints, FftNum, chirpoffset, fftstream0);
+	      //cudaAcc_execute_dfts(FftNum, PADDED_DATA_SIZE);
+	      // //printf("Calling getPowerSpectrum (2) %d %d\r\n", FftNum, chirpoffset);
+	      cudaAcc_GetPowerSpectrum(NumDataPoints, FftNum, chirpoffset, fftstream0, (float*)dev_AutoCorrIn, state.PoT_freq_bin == -1 ? fftlen : 0); 
+	      if(!SkipTriplet || !SkipPulse) // do beforehand on fftstream0
+		{
+		  cudaAcc_calculate_mean(PulsePoTLen, 0, AdvanceBy, fftlen, chirpoffset);
+		}
 	    }
 
 	  state.FLOP_counter+=5*(double)fftlen*log((double)fftlen)/log(2.0) * NumFfts;           
 	  
-	  //printf("Calling getPowerSpectrum %d\r\n", chirpoffset);
-
 	  state.FLOP_counter+=3.0*NumDataPoints;
 	  
 	  if(state.PoT_freq_bin == -1) 
@@ -1190,21 +1207,6 @@ int seti_analyze (ANALYSIS_STATE& state)
 	    }
 
 	  // XXXXXXXXXXXXX
-	  int AdvanceBy  = PulsePoTLen - Overlap;     // in bins		   
-	  
-	  if(!SkipTriplet || !SkipPulse) // do beforehand on fftstreamX
-	    {
-	      //	    CUDASYNC;
-	      //printf("CalculateMean\r\n");
-	      cudaAcc_calculate_mean(PulsePoTLen, 0, AdvanceBy, fftlen, chirpoffset);
-	    }
-	  
-	  if(!SkipPulse) 
-	    {
-	      //printf("FindPulses\r\n");
-	      cudaAcc_find_pulses((float) best_pulse->score, PulsePoTLen, AdvanceBy, fftlen, chirpoffset);
-	    }
-
 	  if(state.PoT_freq_bin == -1) 
 	    {
 	      if(gCudaAutocorrelation && (fftlen == ac_fft_len))
@@ -1214,45 +1216,41 @@ int seti_analyze (ANALYSIS_STATE& state)
 		  cudaAcc_FindAutoCorrelations(ac_fft_len, chirpoffset);
 		}
 	    }
-	  	  
+	  
   	  if(!SkipGauss) 
 	    {
 	      //printf("FindGauss\r\n");
 	      cudaAcc_GaussfitStart(fftlen, best_gauss->score, noscore, chirpoffset);
-	    } 
-
+	    }
+	  
 	  if(!SkipTriplet) 
 	    {
 	      //printf("FindTriplets\r\n");
 	      cudaAcc_find_triplets(PulsePoTLen, (float)PoTInfo.TripletThresh, AdvanceBy, fftlen, chirpoffset);
 	    }
 	  	  
-	  if(state.PoT_freq_bin == -1) 
+	  if(chirpoffset == 0)
 	    {
-	      
-	      if((fftlen == ac_fft_len) && gCudaAutocorrelation)
-		{
-		  //Jason: postprocessing result reduction mostly moved to GPU, no large Device->Host Memcopy needed.
-		  //Just enough info for updating best & reporting signals.
-		  for(ifft = 0; ifft < NumFfts; ifft++)
-		    cudaAcc_GetAutoCorrelation(autoCorrelation[ifft], ac_fft_len, ifft); 
+	      // //printf("Doing dfts %d %d\r\n", FftNum, PADDED_DATA_SIZE);
+	      cudaAcc_execute_dfts(FftNum, PADDED_DATA_SIZE); // this is for the next round
+	    }
 
-		  for(ifft = 0; ifft < NumFfts; ifft++)
-		    {
-		      retval = FindAutoCorrelation_c(autoCorrelation[ifft], fftlen, ifft, swi);
-		      if (retval) SETIERROR(retval,"from FindAutoCorrelation_c() - after Cuda");
-		    }
-		} 
+	  if(!SkipPulse) 
+	    {
+	      //printf("FindPulses\r\n");
+	      cudaAcc_find_pulses((float) best_pulse->score, PulsePoTLen, AdvanceBy, fftlen, chirpoffset);
+	    }
 
+  	  if(state.PoT_freq_bin == -1) 
+	    {
 	      if(fftlen >= 4096 && swi.analysis_cfg.spikes_per_spectrum > 0)
 		{
-		  
-		  //	      cudaEventSynchronize(summaxDoneEvent);
-		  timespec t1, t2;
+		  cudaEventSynchronize(summaxDoneEvent);
+		  /*timespec t1, t2;
 		  t1.tv_sec = 0;
-		  t1.tv_nsec = 10000;
+		  t1.tv_nsec = 5000;
 		  while(cudaEventQuery(summaxDoneEvent) != cudaSuccess)
-		    nanosleep(&t1, &t2);
+		  nanosleep(&t1, &t2);*/
 		  
 		  for(ifft = 0; ifft < NumFfts; ifft++) 
 		    {
@@ -1275,7 +1273,17 @@ int seti_analyze (ANALYSIS_STATE& state)
 	      else
 		state.FLOP_counter+=(double)fftlen * NumFfts;
 
-	      // autocorr was here	      
+	      if((fftlen == ac_fft_len) && gCudaAutocorrelation)
+		{
+		  //Jason: postprocessing result reduction mostly moved to GPU, no large Device->Host Memcopy needed.
+		  //Just enough info for updating best & reporting signals.
+		  for(ifft = 0; ifft < NumFfts; ifft++)
+		    {
+		      cudaAcc_GetAutoCorrelation(autoCorrelation[ifft], ac_fft_len, ifft); 
+		      retval = FindAutoCorrelation_c(autoCorrelation[ifft], fftlen, ifft, swi);
+		      if (retval) SETIERROR(retval,"from FindAutoCorrelation_c() - after Cuda");
+		    }
+		} 
 	    }
 	}
       else
@@ -1376,7 +1384,8 @@ int seti_analyze (ANALYSIS_STATE& state)
       fraction_done(progress,remaining);
       // jeffc
       //fprintf(stderr, "Sdone fft len %d  progress = %12.10f\n", fftlen, progress);
-      
+
+      /*      
       // transpose PoT matrix to make memory accesses nicer
       need_transpose = ChirpFftPairs[icfft].GaussFit || ChirpFftPairs[icfft].PulseFind;
       if ( !need_transpose ) 
@@ -1402,6 +1411,7 @@ int seti_analyze (ANALYSIS_STATE& state)
 	  //	  cudaAcc_transpose((float *)tPowerSpectrum, fftlen, NumFfts);
 	  //	}
         }
+      */
       
       //
       // Analyze Power over Time.  May return quickly if this FFT

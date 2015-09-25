@@ -104,15 +104,6 @@ int analyze_pot(float *PowerSpectrum, int NumDataPoints, ChirpFftPair_t &cfft, i
   static float  *GaussPoT = NULL,
     *PulsePoT = NULL;
   
-#ifdef DUMP_POWER_SPECTRA
-  if(ul_FftLength == FFT_TO_DUMP) 
-    {
-      for (i=0;i<ul_NumDataPoints;i++) 
-	{
-	  fprintf(stdout,"%f\n",fp_PowerSpectrum[i]);
-	}
-    }
-#endif
 #ifdef DEBUG_POT
   fprintf(stderr, "========= FftLength = %d =========\n", FftLength);
 #endif
@@ -263,7 +254,7 @@ int analyze_pot(float *PowerSpectrum, int NumDataPoints, ChirpFftPair_t &cfft, i
 	{
 #endif //USE_CUDA
 	  // loop through frequencies                            
-	  for(; ThisPoT < FftLength; ThisPoT++) 
+	  /*	  for(; ThisPoT < FftLength; ThisPoT++) 
 	    {
 	      
 	      // Create PowerOfTime array for gaussian fit
@@ -300,8 +291,8 @@ int analyze_pot(float *PowerSpectrum, int NumDataPoints, ChirpFftPair_t &cfft, i
 	      retval = checkpoint();
 	      if (retval)
 		SETIERROR(retval,"from checkpoint()");
-	      
 	    }   // end loop through frequencies
+	  */  
 #ifdef USE_CUDA
 	}
 #endif //USE_CUDA
@@ -371,11 +362,14 @@ int analyze_pot(float *PowerSpectrum, int NumDataPoints, ChirpFftPair_t &cfft, i
 	    cudaAcc_find_triplets(PulsePoTLen, (float)PoTInfo.TripletThresh, AdvanceBy, FftLength);
 	    }
 	  */
-	  
-	  //printf("fetchTripletAndPulseFlags\r\n");
-	  int has_data = 0;
-	  if(!SkipTriplet || !SkipPulse)
-	    has_data = cudaAcc_fetchTripletAndPulseFlags(SkipTriplet, SkipPulse, PulsePoTLen, AdvanceBy, FftLength, offset);
+	  /*
+		  timespec t1, t2;
+		  t1.tv_sec = 0;
+		  t1.tv_nsec = 5000;
+		  while(cudaEventQuery(summaxDoneEvent) != cudaSuccess)
+		    nanosleep(&t1, &t2);
+
+	   */
 	  
 	  int gflags = 0;
 	  if(b_gaussStarted)
@@ -385,9 +379,20 @@ int analyze_pot(float *PowerSpectrum, int NumDataPoints, ChirpFftPair_t &cfft, i
 	      gflags = cudaAcc_fetchGaussfitFlags(FftLength, best_gauss->score);
 	    }
 	  
+	  //printf("fetchTripletAndPulseFlags\r\n");
+	  int has_dataT = 0, has_dataP = 0;
+	  if(!SkipTriplet)
+	    has_dataT = cudaAcc_fetchTripletFlags(SkipTriplet, PulsePoTLen, AdvanceBy, FftLength, offset);
+	  
+  	  if(gflags > 0)
+	    {
+	      //printf("ProcessGaussFit\r\n");
+	      cudaAcc_processGaussFit(FftLength, best_gauss->score);
+	    }
+	  
 	  if(!SkipTriplet)
 	    {
-	      if((has_data & 1) && !(has_data & 4)) // has triplet data and no error in triplet
+	      if((has_dataT & 1) && !(has_dataT & 4)) // has triplet data and no error in triplet
 		{
 		  //printf("processTripletResults\r\n");
 		  cudaAcc_processTripletResults(PulsePoTLen, AdvanceBy, FftLength);
@@ -399,21 +404,18 @@ int analyze_pot(float *PowerSpectrum, int NumDataPoints, ChirpFftPair_t &cfft, i
 	      progress += ProgressUnitSize * TripletProgressUnits();
 	    }		
 	  
+	  if(!SkipPulse)
+	    has_dataP = cudaAcc_fetchPulseFlags(SkipTriplet, PulsePoTLen, AdvanceBy, FftLength, offset);
+	  
 	  if(!SkipPulse) 
 	    {
-	      if((has_data & 2) && !(has_data & 8)) // has pulse data and no error in pulse
+	      if((has_dataP & 2) && !(has_dataP & 8)) // has pulse data and no error in pulse
 		{
 		  //printf("processPulseResults\r\n");
 		  cudaAcc_processPulseResults(PulsePoTLen, AdvanceBy, FftLength);
 		}
 	      analysis_state.FLOP_counter+=(PulsePoTLen*0.1818181818182+400.0)*PulsePoTLen * NumPulsePoTs * (FftLength - 1);
 	      progress += ProgressUnitSize * PulseProgressUnits(PulsePoTLen, FftLength - 1);
-	    }
-	  
-	  if(gflags > 0)
-	    {
-	      //printf("ProcessGaussFit\r\n");
-	      cudaAcc_processGaussFit(FftLength, best_gauss->score);
 	    }
 	  
 	  //#ifndef CUDAACC_EMULATION
@@ -425,12 +427,12 @@ int analyze_pot(float *PowerSpectrum, int NumDataPoints, ChirpFftPair_t &cfft, i
 	  //  cudaAcc_processTripletResults(PulsePoTLen, AdvanceBy, FftLength);
 	  //#endif //CUDAACC_EMULATION
 	}
-      else
-	{
+      //      else
+      //	{
 #endif //USE_CUDA
 	  
 	  // loop through frequencies
-	  for(; ThisPoT < FftLength; ThisPoT++) 
+	  /*	  for(; ThisPoT < FftLength; ThisPoT++) 
 	    {
 	      // loop through time for each frequency.  PulsePoTNum is
 	      // used only for progress calculation.
@@ -509,19 +511,20 @@ int analyze_pot(float *PowerSpectrum, int NumDataPoints, ChirpFftPair_t &cfft, i
 		  
 		}  // end loop through time for each frequency
 	      
-	      // At the end of each frequency bin we save state.
+	  	      // At the end of each frequency bin we save state.
 	      analysis_state.PoT_activity = POT_DOING_PULSE;
 	      analysis_state.PoT_freq_bin = ThisPoT;
 	      retval = checkpoint();
 	      if (retval)
 		SETIERROR(retval,"from checkpoint()");
-	      
 	    }   // end loop through frequencies
 	  analysis_state.PoT_freq_bin = -1;
 	  analysis_state.PoT_activity = POT_INACTIVE;
 #ifdef USE_CUDA
 	}
 #endif //USE_CUDA
+	  */
+
     }   // end looking for pulses			
   
   if(b_gaussStarted) // process results late

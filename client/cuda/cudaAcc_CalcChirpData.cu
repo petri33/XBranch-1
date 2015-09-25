@@ -10,8 +10,8 @@ const double SPLITTER=(1<<BSPLIT)+1;
 #define N_TIMES 8
 #define NB 3
 //64
-#define THREADS 256
-#define TB 8
+#define THREADS 64	
+#define TB 6
 
 
 inline float2 splitd(double a) 
@@ -24,9 +24,129 @@ inline float2 splitd(double a)
 
 #define SB 1
 
-__global__ void __launch_bounds__(THREADS, 4)
+// clear math version
+__global__ void
+#if __CUDA_ARCH__ < 500
+__launch_bounds__(THREADS, 6)
+#endif
 #ifdef SB
   cudaAcc_CalcChirpData_kernel_sm13(int NumDataPoints, double ccr, float2 *cx_DataArray, float2 *cx_ChirpDataArray) 
+#else
+  cudaAcc_CalcChirpData_kernel_sm13(int NumDataPoints, double ccr, float2 * __restrict__ cx_DataArray, float2 * __restrict__ cx_ChirpDataArray) 
+#endif
+{
+  int iblock = blockIdx.x; // + blockIdx.y*blockDim.x // * 1024*1024/THREADS; //gridDim.x
+  int ix  = (iblock * THREADS + threadIdx.x) * B; //blockDim.x
+#ifdef SB
+  int ix2 = (iblock * THREADS * N_TIMES); // for reading into shared float4 buffer from float2 addresses
+#endif
+
+  double time = ix; 
+  float time2; 
+  float time3; 
+
+  time = __dmul_rn(time, time); 
+  time2 = (((ix + ix) + 1)); 
+  float ccf = (float)ccr;
+
+  time = __dmul_rn(ccr, time); 
+  time2 = __fmul_rn(ccf, time2); 
+  time3 = ccf + ccf;
+
+  time  = __dsub_rn(time,  __double2int_rd(time)); 
+  time2 = __fsub_rn(time2, __float2int_rd(time2));
+  
+  float ft1 = time; 
+  float ft2 = time2; 
+  float ft3 = time3; 
+ 
+  ft2 = __fmul_rn(ft2, M_2PIf); 
+  ft3 = __fmul_rn(ft3, M_2PIf); 
+  ft1 = __fmul_rn(ft1, M_2PIf); 
+
+  float cf, sf, ca, sa, cb, sb; 
+  
+  __sincosf(ft1, &sf, &cf); 
+  __sincosf(ft2, &sa, &ca); 
+  __sincosf(ft3, &sb, &cb); 
+  
+  float4 *ip = (float4 *)(&cx_DataArray[ix]);
+  float4 *op = (float4 *)(&cx_ChirpDataArray[ix]);
+  float4 *op2 = (float4 *)(&cx_ChirpDataArray[ix+PADDED_DATA_SIZE]);
+
+  float4 tmp = LDG_f4_cs(ip, 0); 
+
+#ifdef SB
+  __shared__ float4 sd[N_TIMES][THREADS+1];
+
+  for(int i = 0; i < N_TIMES; i++)
+    {
+      int row = threadIdx.x & (N_TIMES-1);
+      int col = (i << (TB-NB)) + (threadIdx.x >> NB);
+      int addr = ix2 + i*THREADS + threadIdx.x;
+      sd[row][col] = LDG_f4_cs(&((float4 *)cx_DataArray)[addr], 0); // streaming read, do not leave in cache
+    }
+
+  if(THREADS > 32)
+    __syncthreads();
+  tmp = sd[0][threadIdx.x];
+#endif
+
+  for(int i = 0; i < N_TIMES; i++) // use f and g to rot 
+    { 
+      float sg, cg, tsa; 
+
+      sg = cf * sa + sf * ca; // 
+      cg = cf * ca - sf * sa; // rot f to g by a ready 
+
+      tsa = sa; // 
+      sa = ca * sb + sa * cb;  // 
+      ca = ca * cb - tsa * sb; // rot a by b ready 
+
+      float xsf = tmp.x * sf, ycf = tmp.y * cf;
+      float xcf = tmp.x * cf, ysf = tmp.y * sf;
+      float zcg = tmp.z * cg, wsg = tmp.w * sg;
+      float zsg = tmp.z * sg, wcg = tmp.w * cg;
+      
+      float4 t1, t2;
+      
+      t1.x = __fadd_rn(xcf, -ysf); 
+      t1.y = __fadd_rn(xsf,  ycf); 
+      t1.z = __fadd_rn(zcg, -wsg);
+      t1.w = __fadd_rn(zsg,  wcg); 
+      
+      ST_f4_cg(&op[i], t1);
+      
+      t2.x = __fadd_rn(xcf,  ysf);
+      t2.y = __fadd_rn(ycf, -xsf); 
+      t2.z = __fadd_rn(zcg,  wsg); 
+      t2.w = __fadd_rn(wcg, -zsg);
+      
+      ST_f4_cg(&op2[i], t2);
+      
+#ifdef SB
+      tmp = sd[(i+1)&(N_TIMES-1)][threadIdx.x];
+#else
+      tmp = ip[(i+1)]; 
+#endif
+
+      sf = cg * sa + sg * ca;
+      cf = cg * ca - sg * sa; // rot g to f by a ready 
+ 
+      tsa = sa; // 
+      sa = ca * sb + sa * cb;  // 
+      ca = ca * cb - tsa * sb; // rot a by b ready 
+    } 
+}
+
+
+/*
+__global__ void
+#if __CUDA_ARCH__ < 500
+__launch_bounds__(THREADS, 6)
+#endif
+#ifdef SB
+  cudaAcc_CalcChirpData_kernel_sm13(int NumDataPoints, double ccr, float2 * __restrict__ cx_DataArray, float2 * __restrict__ cx_ChirpDataArray) 
 #else
   cudaAcc_CalcChirpData_kernel_sm13(int NumDataPoints, double ccr, float2 * __restrict__ cx_DataArray, float2 * __restrict__ cx_ChirpDataArray) 
 #endif
@@ -41,13 +161,6 @@ __global__ void __launch_bounds__(THREADS, 4)
   float time2; 
   float time3; 
 
-//  float4 cx[N_TIMES]; 
-//  
-//  for(int i = 0; i < N_TIMES; i++) // load 
-//    {         
-//      cx[i] = *(float4 *)(&cx_DataArray[ix + (i<<1)]); 
-//    }
-
   time = __dmul_rn(time, time); 
   time2 = (((ix + ix) + 1)); 
   float ccf = (float)ccr;
@@ -57,7 +170,7 @@ __global__ void __launch_bounds__(THREADS, 4)
   time2 = __fmul_rn(ccf, time2); 
 
   time = __dsub_rn(time, __double2int_rd(time)); 
-  int itime = __float2int_rd(time2);
+  float itime = __float2int_rd(time2);
   time2 = __fsub_rn(time2, itime); 
 //  time3 = __fsub_rn(time3, __float2int_rd(time3)); 
 
@@ -77,7 +190,7 @@ __global__ void __launch_bounds__(THREADS, 4)
   
   float4 *ip = (float4 *)(&cx_DataArray[ix]);
   float4 *op = (float4 *)(&cx_ChirpDataArray[ix]);
-  float4 *op2 = (float4 *)(&cx_ChirpDataArray[ix+1179648]);
+  float4 *op2 = (float4 *)(&cx_ChirpDataArray[ix+PADDED_DATA_SIZE]);
 
   float4 tmp = *ip; 
   const float nsb = -sb; 
@@ -153,13 +266,8 @@ __global__ void __launch_bounds__(THREADS, 4)
       sa = __fmaf_rn(ca, sb, sacb); // 
       ca = __fmaf_rn(tsa, nsb, cacb); // rot a by b ready 
     } 
-//
-//  for(int i = 0; i < N_TIMES; i++) // store 
-//    { 
-//      *(float4 *)&(cx_ChirpDataArray[ix + (i<<1)]) = cx[i]; 
-//    } 
-//
 }
+*/
 
 
 __global__ void cudaAcc_CalcChirpData_kernel(int NumDataPoints, float2 chirp_rate, float2 recip_sample_rate, float2* cx_DataArray, float2* cx_ChirpDataArray)
@@ -185,9 +293,16 @@ void cudaAcc_CalcChirpData_async(double chirp_rate, double recip_sample_rate, sa
 //	CUDA_ACC_SAFE_LAUNCH( (cudaAcc_CalcChirpData_kernel<<<grid, block,0,chirpstream>>>(cudaAcc_NumDataPoints, splitd(0.5*chirp_rate), splitd(recip_sample_rate), dev_cx_DataArray, dev_cx_ChirpDataArray)),true);
 }
 
+static bool cacheSet = false;
+
 void cudaAcc_CalcChirpData_sm13(double chirp_rate, double recip_sample_rate, sah_complex* cx_ChirpDataArray) {
 //	if (!cudaAcc_initialized()) return;
 
+	if(!cacheSet)
+	  {
+	    cacheSet = true;
+	    cudaFuncSetCacheConfig(cudaAcc_CalcChirpData_kernel, cudaFuncCachePreferShared);
+	  }
 	dim3 block(64, 1, 1);
 	// determined from chirp unit tests, cc 2.1 likes 128 threads here due to superscalar warp schedulers..
 	// assume the architectural balance for future GPU arch will be similar
@@ -201,9 +316,17 @@ void cudaAcc_CalcChirpData_sm13(double chirp_rate, double recip_sample_rate, sah
 	CUDA_ACC_SAFE_LAUNCH( (cudaAcc_CalcChirpData_kernel_sm13<<<grid, block, 0, fftstream0>>>(cudaAcc_NumDataPoints, ccr, dev_cx_DataArray, dev_cx_ChirpDataArray)),true);
 }
 
-void cudaAcc_CalcChirpData_sm13_async(double chirp_rate, double recip_sample_rate, sah_complex* cx_ChirpDataArray, cudaStream_t chirpstream) {
+
+
+void cudaAcc_CalcChirpData_sm13_async(double chirp_rate, double recip_sample_rate, sah_complex* cx_ChirpDataArray, cudaStream_t chirpstream)
+{
 //	if (!cudaAcc_initialized()) return;
 
+	if(!cacheSet)
+	  {
+	    cacheSet = true;
+	    cudaFuncSetCacheConfig(cudaAcc_CalcChirpData_kernel, cudaFuncCachePreferShared);
+	  }
 	dim3 block(64, 1, 1);
 	// determined from chirp unit tests, cc 2.1 likes 128 threads here due to superscalar warp schedulers..
 	// assume the architectural balance for future GPU arch will be similar

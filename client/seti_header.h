@@ -53,7 +53,7 @@
 #define DATA_SUN_BINARY 3
 
 #define MAX_SCOPE_STRINGS 32
-#define MAX_NUM_FFTS       64
+#define MAX_NUM_FFTS       16
 #define MAX_CFFT_PARAMS     2
 
 // Variables of type ChirpFftTable_t (usually an array of such

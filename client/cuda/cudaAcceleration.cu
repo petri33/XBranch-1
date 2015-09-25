@@ -35,7 +35,7 @@
 #include <cufft.h>
 #include <cuda.h>
 
-#include "malloc_a.h"
+//#include "malloc_a.h"
 #include "cudaAcceleration.h"
 #include "cudaAcc_data.h"
 //#ifndef __linux__ //Pretty sure this is unused on windows as well... Can we delete?
@@ -66,14 +66,16 @@ float *dev_PoTPrefixSumG;
 cudaEvent_t fftDoneEvent;
 cudaEvent_t summaxDoneEvent;
 cudaEvent_t powerspectrumDoneEvent;
-cudaEvent_t autocorrelationDoneEvent[8];
-cudaEvent_t ac_reduce_partialEvent[8];
+cudaEvent_t autocorrelationDoneEvent;
+cudaEvent_t autocorrelationRepackDoneEvent;
+cudaEvent_t ac_reduce_partialEvent;
 
 cudaEvent_t meanDoneEvent;
 cudaEvent_t tripletsDoneEvent;
 cudaEvent_t pulseDoneEvent;
 cudaEvent_t pulseCalcDoneEvent;
 cudaEvent_t gaussDoneEvent;
+cudaEvent_t gaussDoneEvent2;
 
 cudaStream_t fftstream0 = 0;
 cudaStream_t fftstream1 = 0;
@@ -86,6 +88,7 @@ bool cuda_pinned = false;
 cudaStream_t cudapsStream[CUDA_MAXNUMSTREAMS];
 cudaStream_t cudaAutocorrStream;
 cudaStream_t gaussStream;
+cudaStream_t summaxStream;
 
 
 extern __global__ void cudaAcc_summax32_kernel(float *input, float3* output, int iterations);
@@ -123,8 +126,8 @@ int cudaAcc_initialized()
 bool cudaAcc_setBlockingSync(int device) 
 {
   //CUDA_ACC_SAFE_CALL(cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync), false);
-  //CUDA_ACC_SAFE_CALL(cudaSetDeviceFlags(cudaDeviceScheduleYield), false);
-  CUDA_ACC_SAFE_CALL(cudaSetDeviceFlags(cudaDeviceScheduleSpin), false);
+  CUDA_ACC_SAFE_CALL(cudaSetDeviceFlags(cudaDeviceScheduleYield), false);
+  //CUDA_ACC_SAFE_CALL(cudaSetDeviceFlags(cudaDeviceScheduleSpin), false);
   
   return true;
 }
@@ -312,7 +315,7 @@ int cudaAcc_initializeDevice(int devPref, int usePolling)
   // Override for specific kernels where we need the shared memory instead
   // (e.g. find_triplets_kernel)
   
-  cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
+//  cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
 #endif
   
   //  gpu device heuristics
@@ -359,17 +362,16 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
   cudaEventCreateWithFlags(&summaxDoneEvent, cudaEventDisableTiming);
   cudaEventCreateWithFlags(&powerspectrumDoneEvent, cudaEventDisableTiming);
 
-  for(int i = 0; i < 8; i++)
-    {
-      cudaEventCreateWithFlags(&(autocorrelationDoneEvent[i]), cudaEventDisableTiming);
-      cudaEventCreateWithFlags(&(ac_reduce_partialEvent[i]), cudaEventDisableTiming);
-    }
-
+  cudaEventCreateWithFlags(&autocorrelationDoneEvent, cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&autocorrelationRepackDoneEvent, cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&ac_reduce_partialEvent, cudaEventDisableTiming);
+      
   cudaEventCreateWithFlags(&meanDoneEvent, cudaEventDisableTiming);
   cudaEventCreateWithFlags(&tripletsDoneEvent, cudaEventDisableTiming);
   cudaEventCreateWithFlags(&pulseDoneEvent, cudaEventDisableTiming);
   cudaEventCreateWithFlags(&pulseCalcDoneEvent, cudaEventDisableTiming);
   cudaEventCreateWithFlags(&gaussDoneEvent, cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&gaussDoneEvent2, cudaEventDisableTiming);
 
   // events created
 
@@ -408,7 +410,7 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
   cudaAcc_init++;
   
   
-  cu_err = cudaMalloc((void**) &dev_WorkData, 64*2*sizeof(*dev_WorkData) * NumDataPoints * PADVAL); // + 1/8 for find_pulse));
+  cu_err = cudaMalloc((void**) &dev_WorkData, MAX_NUM_FFTS*2*sizeof(*dev_WorkData) * NumDataPoints * PADVAL); // + 1/8 for find_pulse));
   if(cudaSuccess != cu_err) 
     {
       CUDA_ACC_SAFE_CALL_NO_SYNC("cudaMalloc((void**) &dev_WorkData");
@@ -423,7 +425,7 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
     } else { CUDAMEMPRINT(dev_best_potP,"cudaMalloc((void**) &dev_best_potP",NumDataPoints * PADVAL,sizeof(*dev_best_potP)); };
   cudaAcc_init++;
   
-  cu_err = cudaMalloc((void**) &dev_PowerSpectrum, 2*sizeof(*dev_PowerSpectrum) * NumDataPoints * PADVAL);
+  cu_err = cudaMalloc((void**) &dev_PowerSpectrum, MAX_NUM_FFTS*2*sizeof(*dev_PowerSpectrum) * NumDataPoints * PADVAL);
   if(cudaSuccess != cu_err) 
     {
       CUDA_ACC_SAFE_CALL_NO_SYNC("cudaMalloc((void**) &dev_PowerSpectrum");
@@ -453,12 +455,12 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
     } else { CUDAMEMPRINT(dev_t_PowerSpectrumG,"cudaMalloc((void**) &dev_t_PowerSpectrumG",NumDataPoints+8,sizeof(*dev_t_PowerSpectrumG)); };
   cudaAcc_init++;
   
-  cu_err = cudaMalloc((void**) &dev_GaussFitResults, sizeof(*dev_GaussFitResults) * NumDataPoints);
+  cu_err = cudaMalloc((void**) &dev_GaussFitResults, sizeof(*dev_GaussFitResults) * NumDataPoints); 
   if(cudaSuccess != cu_err) 
     {
       CUDA_ACC_SAFE_CALL_NO_SYNC("cudaMalloc((void**) &dev_GaussFitResults");
       return 1;
-    } else { CUDAMEMPRINT(dev_GaussFitResults,"cudaMalloc((void**) &dev_GaussFitResults",NumDataPoints,sizeof(*dev_GaussFitResults)); };
+    } else { CUDAMEMPRINT(dev_GaussFitResults,"cudaMalloc((void**) &dev_GaussFitResults",NumDataPoints,sizeof(*dev_GaussFitResults)*2); };
   cudaAcc_init++;
 
   cu_err = cudaMalloc((void**) &dev_TripletResults, sizeof(*dev_TripletResults) * NumDataPoints);
@@ -483,9 +485,10 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
   //CUDA_ACC_SAFE_CALL(cudaMalloc((void**) &dev_GaussFitResultsReordered2, sizeof(*dev_GaussFitResultsReordered2) * NumDataPoints)); // TODO: it can be smaller
   
 #ifdef PINNED
-  cudaMallocHost((void **)&GaussFitResults, sizeof(*GaussFitResults) * NumDataPoints);
-  cudaMallocHost((void **)&TripletResults, sizeof(*TripletResults) * NumDataPoints);
-  cudaMallocHost((void **)&PulseResults, sizeof(*PulseResults) * NumDataPoints);
+  printf("MallocHost G=%ld T=%ld P=%ld (%ld)\r\n", sizeof(*GaussFitResults) * NumDataPoints*2, sizeof(*TripletResults) * NumDataPoints/2, sizeof(*PulseResults) * NumDataPoints/2, sizeof(*PulseResults));
+  cudaMallocHost((void **)&GaussFitResults, sizeof(*GaussFitResults) * NumDataPoints*2);
+  cudaMallocHost((void **)&TripletResults, sizeof(*TripletResults) * NumDataPoints/2);
+  cudaMallocHost((void **)&PulseResults, sizeof(*PulseResults) * NumDataPoints/2);
 #else
   GaussFitResults = (float4*) malloc(sizeof(*GaussFitResults) * NumDataPoints);
 #endif
@@ -558,10 +561,15 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
   dev_report_potP = dev_PoTP;
 
 #ifdef PINNED
+  printf("MalloHost tmp_PoTP=%ld\r\n", NumDataPoints * sizeof(*tmp_PoTP) * 3 / 2);
   cudaMallocHost((void **)&tmp_PoTP, NumDataPoints * sizeof(*tmp_PoTP) * 3 / 2);
+  printf("MalloHost tmp_PoTT=%ld\r\n", NumDataPoints * sizeof(*tmp_PoTT) * 3 / 2);
   cudaMallocHost((void **)&tmp_PoTT, NumDataPoints * sizeof(*tmp_PoTT) * 3 / 2);
+  printf("MalloHost tmp_PoTG=%ld\r\n", NumDataPoints * sizeof(*tmp_PoTG) * 3 / 2);
   cudaMallocHost((void **)&tmp_PoTG, NumDataPoints * sizeof(*tmp_PoTG) * 3 / 2);
+  printf("MalloHost best_PoTP=%ld\r\n", NumDataPoints * sizeof(*best_PoTP) * 3 / 2);
   cudaMallocHost((void **)&best_PoTP, NumDataPoints * sizeof(*best_PoTP) * 3 / 2);
+  printf("MalloHost bestPoTG=%ld\r\n", NumDataPoints * sizeof(*best_PoTG) * 3 / 2);
   cudaMallocHost((void **)&best_PoTG, NumDataPoints * sizeof(*best_PoTG) * 3 / 2);
 #else
   tmp_PoT = (float*) malloc(NumDataPoints * sizeof(*tmp_PoT) * 3 / 2);
@@ -594,7 +602,9 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
   
   cudaAcc_NumDataPoints = NumDataPoints;
 #ifdef PINNED
+  printf("MallocHost tmp_smallPoT=%ld\r\n", NumDataPoints / 8 * sizeof(*tmp_small_PoT));
   cudaMallocHost((void **)&tmp_small_PoT, NumDataPoints / 8 * sizeof(*tmp_small_PoT));
+  printf("MallocHost PowerSpectrumSumMax=%ld\r\n", 2*sizeof(*dev_PowerSpectrumSumMax) * NumDataPoints / 8);
   cudaMallocHost((void **)&PowerSpectrumSumMax, 2*sizeof(*dev_PowerSpectrumSumMax) * NumDataPoints / 8);		
 #else
   tmp_small_PoT = (float*) malloc(NumDataPoints / 8 * sizeof(*tmp_small_PoT));
@@ -606,6 +616,7 @@ int cudaAcc_initialize(sah_complex* cx_DataArray, int NumDataPoints, int gauss_p
   cudaStreamCreate(&pulseStream);
   cudaStreamCreate(&tripletStream);
   cudaStreamCreate(&gaussStream);
+  cudaStreamCreate(&summaxStream);
 
   if(cudaAcc_initializeGaussfit(PoTInfo, gauss_pot_length, nsamples, gauss_null_chi_sq_thresh, gauss_chi_sq_thresh))
     {
@@ -696,6 +707,7 @@ int cudaAcc_InitializeAutocorrelation(int ac_fftlen)
   if(gCudaAutocorrelation)
     {
       cu_errf = cufftPlan1d(&cudaAutoCorr_plan, ac_fftlen*4, CUFFT_C2C, 8); //4N FFT method, batch of 8
+//      cu_errf = cufftPlan1d(&cudaAutoCorr_plan, ac_fftlen*2, CUFFT_R2C, 8); //4N FFT method, batch of 8
       if(cu_errf != CUFFT_SUCCESS)
 	{fprintf(stderr, "plan many failed %d\r\n", cu_errf); return 1;}
 
@@ -721,7 +733,7 @@ int cudaAcc_InitializeAutocorrelation(int ac_fftlen)
 	}
       */
 
-      //printf("Mallocing blockSums %d bytes\r\n", 8*131072/2/256*sizeof(float3));
+      printf("Mallocing blockSums %ld bytes\r\n", 8*131072/2/256*sizeof(float3));
       cudaMallocHost((void **)&blockSums, 8*131072/2/256*sizeof(float3));
 
       if(CUFFT_SUCCESS != cu_errf) 
@@ -803,6 +815,7 @@ void cudaAcc_free()
   cudaStreamDestroy(tripletStream);
   cudaStreamDestroy(pulseStream);
   cudaStreamDestroy(gaussStream);
+  cudaStreamDestroy(summaxStream);
 
   switch(cudaAcc_init) 
     {
@@ -890,6 +903,6 @@ void cudaAcc_free()
 #endif
   fprintf(stderr,"cudaAcc_free() DONE.\n");
   fprintf(stderr, "13");
-  CUDA_ACC_SAFE_CALL(cudaSetDeviceFlags(cudaDeviceScheduleYield), false);
+  //CUDA_ACC_SAFE_CALL(cudaSetDeviceFlags(cudaDeviceScheduleYield), false);
 }
 #endif
